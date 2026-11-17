@@ -6,7 +6,7 @@ import {
   MIN, CONSTANTS, DEFAULT_PROFILES, parseCsv, parseTags, toMmol, parseReadingsCsv, dedupeReadings,
   importSummary, profileGlucose, matchTest, scoreTest, ratingFor, evaluateTest, rankFoods,
   prickSchedule, nextPrick, formatCountdown, foodNames, validateBackup, normFood,
-  normItems, migrateTest, migrateBackup, testLabel, mealKey, rankIngredients, BACKUP_VERSION,
+  parseGlucoseInput, makeManualReading, normItems, migrateTest, migrateBackup, testLabel, mealKey, rankIngredients, BACKUP_VERSION,
 } from '../js/logic.js';
 import { readReadingsCsvFromZip } from '../js/zip.js';
 
@@ -340,4 +340,66 @@ test('rankIngredients: nulls when not computable, confidence threshold', () => {
   const three = rankIngredients([1, 2, 3].map(i => ({ items: ['Egg'], rise: 0.5, start: i })));
   assert.equal(three[0].lowConfidence, false);
   assert.equal(three[0].soloN, 3);
+});
+
+// ---- manual readings ----
+const M = (id, min, value, profileId = 'chris') => makeManualReading(id, profileId, value, START + min * MIN);
+const lea = { id: 'lea', name: 'Lea', tag: 'lea' };
+
+test('manual reading has m- id and belongs only to its profile', () => {
+  const r = M('x', 0, 5.4);
+  assert.equal(r.id, 'm-x');
+  assert.equal(r.source, 'manual');
+  assert.equal(profileGlucose([r], chris, 0).length, 1);
+  assert.equal(profileGlucose([r], lea, 0).length, 0);
+});
+
+test('offset is not applied to manual readings', () => {
+  const rs = [M('x', 60, 5), G('a', 120, 5)];
+  const g = profileGlucose(rs, chris, -120);
+  assert.deepEqual(g.map(r => r.ts), [START, START + 60 * MIN]);   // imported shifted, manual stays
+  const g2 = profileGlucose([M('x', 0, 5)], chris, -120);
+  assert.equal(g2[0].ts, START);
+});
+
+test('manual within 3 min of an imported reading is dropped; 4 min is kept', () => {
+  const imp = G('a', 60, 7);
+  const near = M('n', 62.5, 8), far = M('f', 64, 8), exact = M('e', 63, 8);
+  const g = profileGlucose([imp, near, far, exact], chris, 0);
+  assert.deepEqual(g.map(r => r.id), ['a', 'm-f']);
+  // dedupe uses the offset-adjusted imported time
+  const g2 = profileGlucose([G('a', 180, 7), M('n', 60, 8)], chris, -120);
+  assert.deepEqual(g2.map(r => r.id), ['a']);
+});
+
+test('parseGlucoseInput: comma, dot, range, empty', () => {
+  assert.deepEqual(parseGlucoseInput('5,4'), { ok: true, value: 5.4 });
+  assert.deepEqual(parseGlucoseInput(' 5.45 '), { ok: true, value: 5.5 });
+  assert.equal(parseGlucoseInput('1').value, 1);
+  assert.equal(parseGlucoseInput('33.3').ok, true);
+  for (const bad of ['0.9', '33.4', '100', 'abc', '5..4', '-3']) assert.equal(parseGlucoseInput(bad).ok, false, bad);
+  const e = parseGlucoseInput('  ');
+  assert.equal(e.ok, false); assert.equal(e.empty, true);
+  assert.equal(parseGlucoseInput(undefined).ok, false);
+});
+
+test('a test scored purely from manual readings is complete and rated', () => {
+  const rs = [M('1', 0, 5.0), M('2', 30, 7.5), M('3', 60, 6.8), M('4', 120, 5.2)];
+  const ev = evaluateTest({ start: START }, rs, chris, -120);
+  assert.equal(ev.complete, true);
+  assert.equal(ev.score.rise, 2.5);
+  assert.equal(ev.score.rating, 'red');
+  assert.equal(ev.score.recoveryMin, 120);
+  assert.equal(evaluateTest({ start: START }, rs, lea, 0).complete, false);
+});
+
+test('backup validation accepts manual readings; import dedupe leaves them alone', () => {
+  const man = M('x', 0, 5.4);
+  const ok = { app: 'glucose-track', version: 2, profiles: DEFAULT_PROFILES, settings: { offsetMin: 0 },
+    tests: [{ id: 't', profileId: 'chris', items: ['x'], start: 1 }], readings: [man, G('a', 0, 5)] };
+  assert.equal(validateBackup(ok).ok, true);
+  assert.equal(migrateBackup(ok).readings[0], man);
+  assert.equal(validateBackup({ ...ok, readings: [{ ...man, time: undefined }] }).ok, false);
+  const { fresh, duplicates } = dedupeReadings([G('a', 0, 5)], [man.id]);
+  assert.equal(fresh.length, 1); assert.equal(duplicates, 0);
 });

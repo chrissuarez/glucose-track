@@ -4,6 +4,8 @@ A small offline-capable web app for two people sharing one Keto-Mojo GKI meter. 
 
 Not medical advice.
 
+**Manual readings.** No Keto-Mojo app? Type readings in: an optional baseline on the New test form, and an "Add a reading" card on the test screen (also for late entry). They are stored per profile (`source: 'manual'`, id prefix `m-`), are never shifted by the meter clock offset, are included in backups, and can be deleted (imported readings cannot). If an imported reading of the same profile lies within 3 minutes of a typed one, only the imported one is used. Valid range 1.0-33.3 mmol/L; comma or dot accepted.
+
 ## Run locally
 
 ```

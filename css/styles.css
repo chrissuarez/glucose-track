@@ -131,3 +131,4 @@ ul.plain li { margin: .4rem 0; }
 }
 .err-text { color: var(--red); font-weight: 700; }
 .row-link .main .sub { display: block; }
+td .sub { color: var(--muted); font-size: .85rem; }

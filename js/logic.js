@@ -195,13 +195,41 @@ export function mealKey(t) {
   return normItems(t?.items).map(normFood).sort().join(' + ');
 }
 
-/** Glucose readings belonging to a profile, offset applied (ts shifted by offsetMin). */
+export const MANUAL_MIN = 1.0, MANUAL_MAX = 33.3;
+export const DEDUP_MIN = 3;   // manual reading within this many minutes of an imported one is dropped
+
+/** Parse a typed glucose value (comma or dot). Returns { ok, value } or { ok:false, error }. */
+export function parseGlucoseInput(text) {
+  const t = String(text ?? '').trim().replace(',', '.');
+  if (t === '') return { ok: false, empty: true, error: 'Enter a reading in mmol/L.' };
+  if (!/^\d+(\.\d*)?$|^\.\d+$/.test(t)) return { ok: false, error: 'That is not a number. Example: 5.4' };
+  const v = round1(Number(t));
+  if (!(v >= MANUAL_MIN && v <= MANUAL_MAX)) return { ok: false, error: `Reading must be between ${MANUAL_MIN.toFixed(1)} and ${MANUAL_MAX} mmol/L.` };
+  return { ok: true, value: v };
+}
+
+export const isManual = r => !!r && r.source === 'manual';
+
+/** Build a manual reading record. `value` must already be validated. */
+export function makeManualReading(id, profileId, value, time, now = Date.now()) {
+  return { id: 'm-' + id, source: 'manual', profileId, type: 'glucose', value: round1(value), time, created: now };
+}
+
+/**
+ * Glucose readings belonging to a profile, sorted by time (as `ts`).
+ * Imported: matched by tag, shifted by the meter clock offset. Manual: matched by profileId, never shifted.
+ * A manual reading within DEDUP_MIN minutes of an imported one (after offset) is dropped.
+ */
 export function profileGlucose(readings, profile, offsetMin = 0) {
   const tag = profile.tag.toLowerCase();
-  return readings
-    .filter(r => r.type === 'glucose' && r.tags && r.tags.includes(tag))
-    .map(r => ({ ...r, ts: r.ts + offsetMin * MIN }))
-    .sort((a, b) => a.ts - b.ts);
+  const imported = readings
+    .filter(r => !isManual(r) && r.type === 'glucose' && r.tags && r.tags.includes(tag))
+    .map(r => ({ ...r, ts: r.ts + offsetMin * MIN }));
+  const manual = readings
+    .filter(r => isManual(r) && r.type === 'glucose' && r.profileId === profile.id && Number.isFinite(r.time))
+    .map(r => ({ ...r, ts: r.time }))
+    .filter(m => !imported.some(i => Math.abs(i.ts - m.ts) <= DEDUP_MIN * MIN));
+  return [...imported, ...manual].sort((a, b) => a.ts - b.ts);
 }
 
 /**
@@ -385,8 +413,11 @@ export function validateBackup(obj) {
       typeof t.profileId === 'string' && foodOk(t) && Number.isFinite(t.start))) {
     return bad('Backup has invalid tests.');
   }
-  if (!Array.isArray(obj.readings) || !obj.readings.every(r => r && typeof r.id === 'string' &&
-      Number.isFinite(r.ts) && typeof r.type === 'string' && Number.isFinite(r.value) && Array.isArray(r.tags))) {
+  const readingOk = r => r && typeof r.id === 'string' && typeof r.type === 'string' && Number.isFinite(r.value) &&
+    (r.source === 'manual'
+      ? typeof r.profileId === 'string' && Number.isFinite(r.time)
+      : Number.isFinite(r.ts) && Array.isArray(r.tags));
+  if (!Array.isArray(obj.readings) || !obj.readings.every(readingOk)) {
     return bad('Backup has invalid readings.');
   }
   return { ok: true };

@@ -1,6 +1,6 @@
 import {
   MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, rankIngredients, prickSchedule,
-  formatCountdown, foodNames, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
+  formatCountdown, foodNames, parseGlucoseInput, makeManualReading, isManual, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -252,6 +252,8 @@ function testView(id) {
       h('p', { class: 'help' }, 'Keep this app open for alerts. Phones may pause it when the screen is off, so also set a phone timer.')));
   }
 
+  if (profile().id === t.profileId) nodes.push(addReadingCard());
+
   // result
   nodes.push(h('h3', null, 'Result'));
   if (score) {
@@ -271,8 +273,13 @@ function testView(id) {
   }
   const rows = [...(match.baseline ? [['Baseline', match.baseline]] : []), ...match.post.map(p => [null, p])];
   if (rows.length) {
-    nodes.push(h('table', null, h('tr', null, h('th', null, 'Time'), h('th', null, 'Min'), h('th', null, 'mmol/L')),
-      rows.map(([lbl, r]) => h('tr', null, h('td', null, fmtTime(r.ts)), h('td', null, `${Math.round(r.min)}${lbl ? ' (base)' : ''}`), h('td', null, round1(r.value).toFixed(1))))));
+    nodes.push(h('table', null, h('tr', null, h('th', null, 'Time'), h('th', null, 'Min'), h('th', null, 'mmol/L'), h('th', null, '')),
+      rows.map(([lbl, r]) => h('tr', null, h('td', null, fmtTime(r.ts)), h('td', null, `${Math.round(r.min)}${lbl ? ' (base)' : ''}`), h('td', null, round1(r.value).toFixed(1)),
+        h('td', null, isManual(r) ? [h('span', { class: 'sub' }, 'typed '),
+          h('button', { type: 'button', class: 'btn danger small', 'aria-label': `Delete typed reading ${round1(r.value).toFixed(1)} at ${fmtTime(r.ts)}`, onclick: async () => {
+            if (!confirm(`Delete the typed reading ${round1(r.value).toFixed(1)} mmol/L at ${fmtTime(r.ts)}?`)) return;
+            try { await db.del('readings', r.id); await reload(); render(); } catch (e) { toast(e.message); }
+          } }, 'Delete')] : null)))));
   }
   nodes.push(h('div', { class: 'actions' },
     h('a', { class: 'btn secondary', href: `#/edit/${t.id}` }, 'Edit'),
@@ -281,6 +288,27 @@ function testView(id) {
       try { await db.del('tests', t.id); await reload(); location.hash = '#/tests'; } catch (e) { toast(e.message); }
     } }, 'Delete')));
   return nodes;
+}
+function addReadingCard() {
+  const val = h('input', { id: 'rval', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: 'e.g. 5.4' });
+  const when = h('input', { id: 'rtime', type: 'datetime-local', value: toLocalInput(Date.now()) });
+  const err = h('div', { role: 'alert' });
+  const save = async () => {
+    const p = parseGlucoseInput(val.value);
+    const ts = new Date(when.value).getTime();
+    if (!p.ok) { err.replaceChildren(h('p', { class: 'help err-text' }, p.error)); val.focus(); return; }
+    if (!Number.isFinite(ts)) { err.replaceChildren(h('p', { class: 'help err-text' }, 'Enter a valid time.')); return; }
+    try {
+      await db.put('readings', makeManualReading(uid(), profile().id, p.value, ts));
+      await reload(); render(); toast('Reading saved.');
+    } catch (e) { err.replaceChildren(errorCard(e)); }
+  };
+  val.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save(); } });
+  return h('div', { class: 'card' }, h('h3', null, 'Add a reading'),
+    h('label', { for: 'rval' }, 'Reading (mmol/L)'), val,
+    h('label', { for: 'rtime' }, 'Time of reading'), when, err,
+    h('button', { class: 'btn', type: 'button', onclick: save }, 'Save reading'),
+    h('p', { class: 'help' }, 'No Keto-Mojo app? Type each reading in right after you prick. Also works for late entry.'));
 }
 const stat = (v, l) => h('div', { class: 'stat' }, h('b', null, v), h('span', null, l));
 
@@ -303,6 +331,7 @@ function testFormView(id) {
   const food = h('input', { id: 'food', list: 'foods', autocomplete: 'off', autocapitalize: 'sentences', enterkeyhint: 'done' });
   const chips = h('ul', { class: 'chips', 'aria-label': 'Foods in this meal' });
   const start = h('input', { id: 'start', type: 'datetime-local', required: true, value: toLocalInput(existing?.start ?? Date.now()) });
+  const base = h('input', { id: 'base', type: 'text', inputmode: 'decimal', step: '0.1', autocomplete: 'off', placeholder: 'e.g. 5.1' });
   const note = h('textarea', { id: 'note', rows: 2 }, existing?.note || '');
   const err = h('div', { role: 'alert' });
   const drawChips = () => chips.replaceChildren(...items.map(it => h('li', null, h('span', null, it),
@@ -321,13 +350,18 @@ function testFormView(id) {
     const all = normItems([...items, food.value]);   // include text typed but not added
     if (!all.length) { err.replaceChildren(h('p', { class: 'help err-text' }, 'Add at least one food.')); food.focus(); return; }
     if (!Number.isFinite(st)) { err.replaceChildren(h('p', { class: 'help err-text' }, 'Enter a valid start time.')); return; }
+    const bp = existing ? { ok: false, empty: true } : parseGlucoseInput(base.value);
+    if (!bp.ok && !bp.empty) { err.replaceChildren(h('p', { class: 'help err-text' }, bp.error)); base.focus(); return; }
     // reuse the existing spelling of a food seen before in this profile
     const known = new Map(names.map(n => [normFood(n), n]));
     const finalItems = normItems(all.map(n => known.get(normFood(n)) || n));
     const rec = existing ? { ...existing } : { id: uid(), profileId: profile().id, created: Date.now() };
     delete rec.food;
     Object.assign(rec, { items: finalItems, mealName: mealName.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim() });
-    try { await db.put('tests', rec); await reload(); location.hash = `#/test/${rec.id}`; }
+    try {
+      await db.put('tests', rec);
+      if (bp.ok) await db.put('readings', makeManualReading(uid(), profile().id, bp.value, Math.min(Date.now(), st)));
+      await reload(); location.hash = `#/test/${rec.id}`; }
     catch (ex) { err.replaceChildren(errorCard(ex)); }
   } },
     h('label', { for: 'mealname' }, 'Meal name (optional)'), mealName,
@@ -338,6 +372,8 @@ function testFormView(id) {
     h('p', { class: 'help' }, 'List every food, one at a time. Testing a single food gives the clearest answer.'),
     h('label', { for: 'start' }, 'Start time (first bite)'), start,
     h('p', { class: 'help' }, 'Prick your finger just before eating for the baseline.'),
+    existing ? null : [h('label', { for: 'base' }, 'Baseline reading (mmol/L, optional)'), base,
+      h('p', { class: 'help' }, 'Type it now if you have no Keto-Mojo app. You can also add readings later on the test screen.')],
     h('label', { for: 'note' }, 'Note (optional)'), note, err,
     h('button', { class: 'btn', type: 'submit' }, existing ? 'Save changes' : 'Start test'),
     h('a', { class: 'btn secondary', href: existing ? `#/test/${existing.id}` : '#/' }, 'Cancel'));
@@ -385,6 +421,7 @@ function foodHelp() {
     h('li', null, 'Prick before eating (baseline), then 30, 60 and 120 minutes after the first bite.'),
     h('li', null, 'Tag each reading on the meter with your name (Chris or Lea) so it goes to the right person.'),
     h('li', null, 'Repeat each food 2-3 times. One test is only a hint; averages are more reliable.'),
+    h('li', null, 'No Keto-Mojo app? Type each reading into the test screen right after you prick.'),
     h('li', null, 'Import the meter export into the app after the test. The app matches readings to tests by time.'),
     h('li', null, 'Add this app to your home screen. On iPhone, Safari may delete data from sites not opened for 7 days unless the app has been added to the home screen. Make backups regularly anyway.'));
 }
