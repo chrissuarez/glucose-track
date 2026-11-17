@@ -1,0 +1,5 @@
+sep=,
+# version: 1.1
+"reading_timestamp","reading_type","reading_sample_type","reading_value","reading_unit","source","meter_type","serial_number","device_id","tags","notes","reading_timezone","reading_series","reading_series_interval_seconds","metadata_key","has_calculated_gki","reading_id"
+"2026-01-01T12:00:00.000+00:00","glucose","blood","5.0","mmoll","device","gki_meter","TESTSERIAL001","","['chris']","","Europe/London","","","{}","False","test-id-0001"
+"2026-01-01T12:45:00.000+00:00","glucose","blood","6.0","mmoll","device","gki_meter","TESTSERIAL001","","['chris']","","Europe/London","","","{}","False","test-id-0009"

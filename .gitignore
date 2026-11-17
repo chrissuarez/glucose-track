@@ -1,0 +1,7 @@
+# Real health data must never be committed
+*.zip
+*Zone.Identifier
+readings*.csv
+!tests/fixtures/*.csv
+node_modules/
+.DS_Store
