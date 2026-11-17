@@ -1,6 +1,6 @@
 import {
-  MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, prickSchedule,
-  formatCountdown, foodNames, normFood, validateBackup, daysSince, round1,
+  MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, rankIngredients, prickSchedule,
+  formatCountdown, foodNames, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -107,7 +107,7 @@ function chart(match) {
 function testRow(t) {
   const { score, match } = evalT(t);
   return h('a', { class: 'row-link', href: `#/test/${t.id}` },
-    h('div', { class: 'main' }, h('strong', null, t.food), h('span', { class: 'sub' }, fmtDT(t.start))),
+    h('div', { class: 'main' }, h('strong', null, testLabel(t)), h('span', { class: 'sub' }, fmtDT(t.start))),
     h('div', { class: 'right' }, badge(score),
       score ? null : h('span', { class: 'sub' }, match.baseline ? 'needs more readings' : 'no readings yet')));
 }
@@ -134,7 +134,7 @@ function homeView() {
   const nodes = [h('h2', null, `Hi ${profile().name}`), backupNotice()];
   if (active) {
     nodes.push(h('a', { class: 'row-link', href: `#/test/${active.id}` },
-      h('div', { class: 'main' }, h('strong', null, 'Test in progress: ' + active.food), h('span', { class: 'sub' }, 'Tap for the prick schedule')),
+      h('div', { class: 'main' }, h('strong', null, 'Test in progress: ' + testLabel(active)), h('span', { class: 'sub' }, 'Tap for the prick schedule')),
       h('span', { class: 'badge amber' }, 'Open')));
   }
   nodes.push(
@@ -160,35 +160,66 @@ function testsView() {
     tests.length ? tests.map(testRow) : h('p', { class: 'help' }, 'No tests yet.')];
 }
 
-function foodsView() {
+function foodsTabs(active) {
+  const tab = (id, label, href) => h('a', { class: 'seg' + (active === id ? ' on' : ''), href, role: 'tab', 'aria-selected': String(active === id) }, label);
+  return h('div', { class: 'segs', role: 'tablist', 'aria-label': 'Foods view' },
+    tab('ingredients', 'Ingredients', '#/foods'), tab('meals', 'Meals', '#/foods/meals'));
+}
+
+function foodsView(tab) {
   const tests = myTests();
-  const ranked = rankFoods(tests.map(t => ({ food: t.food, start: t.start, rise: evalT(t).score?.rise })));
-  const incomplete = tests.filter(t => !evalT(t).complete).length;
-  const nodes = [h('h2', null, `${profile().name}'s foods`),
-    h('p', { class: 'help' }, 'Best (lowest average rise) first. Only complete tests count.')];
-  if (!ranked.length) nodes.push(h('div', { class: 'card' }, 'No complete tests yet. Import your meter readings after a test to see results.'));
-  for (const f of ranked) {
-    nodes.push(h('a', { class: 'row-link', href: `#/food/${encodeURIComponent(f.key)}` },
-      h('div', { class: 'main' }, h('strong', null, f.name),
-        h('span', { class: 'sub' }, `${f.count} complete test${f.count === 1 ? '' : 's'}`)),
-      h('div', { class: 'right' }, h('span', { class: 'badge ' + f.rating }, `${RATING_LABEL[f.rating]} +${f.avgRise.toFixed(1)}`),
-        f.lowConfidence ? h('span', { class: 'sub' }, 'Low confidence') : null)));
+  const evald = tests.map(t => ({ t, score: evalT(t).score }));
+  const incomplete = evald.filter(x => !x.score).length;
+  const nodes = [h('h2', null, `${profile().name}'s foods`), foodsTabs(tab)];
+  const signed = x => (x < 0 ? '−' : '+') + Math.abs(x).toFixed(1);
+  if (tab === 'meals') {
+    nodes.push(h('p', { class: 'help' }, 'Best (lowest average rise) first. Only complete tests count.'));
+    const ranked = rankFoods(evald.map(({ t, score }) => ({ food: testLabel(t), key: mealKey(t), start: t.start, rise: score?.rise })));
+    if (!ranked.length) nodes.push(h('div', { class: 'card' }, 'No complete tests yet. Import your meter readings after a test to see results.'));
+    for (const f of ranked) {
+      nodes.push(h('a', { class: 'row-link', href: `#/food/${encodeURIComponent(f.key)}` },
+        h('div', { class: 'main' }, h('strong', null, f.name),
+          h('span', { class: 'sub' }, `${f.count} complete test${f.count === 1 ? '' : 's'}`)),
+        h('div', { class: 'right' }, h('span', { class: 'badge ' + f.rating }, `${RATING_LABEL[f.rating]} +${f.avgRise.toFixed(1)}`),
+          f.lowConfidence ? h('span', { class: 'sub' }, 'Low confidence') : null)));
+    }
+  } else {
+    nodes.push(h('p', { class: 'help' }, 'Mixed meals blur the picture. Test a food on its own to confirm it.'));
+    const ranked = rankIngredients(evald.map(({ t, score }) => ({ items: t.items, start: t.start, rise: score?.rise })));
+    if (!ranked.length) nodes.push(h('div', { class: 'card' }, 'No complete tests yet. Import your meter readings after a test to see results.'));
+    for (const f of ranked) {
+      nodes.push(h('a', { class: 'row-link', href: `#/ingredient/${encodeURIComponent(f.key)}` },
+        h('div', { class: 'main' }, h('strong', null, f.name),
+          h('span', { class: 'sub' }, `${f.n} test${f.n === 1 ? '' : 's'}`),
+          f.diff != null ? h('span', { class: 'sub' }, `vs without: ${signed(f.diff)}`) : null,
+          f.soloN ? h('span', { class: 'sub' }, `alone: ${f.soloAvgRise.toFixed(1)} (${f.soloN})`) : null),
+        h('div', { class: 'right' }, h('span', { class: 'badge ' + f.rating }, `${RATING_LABEL[f.rating]} +${f.avgRise.toFixed(1)}`),
+          f.lowConfidence ? h('span', { class: 'sub' }, 'Low confidence') : null)));
+    }
   }
-  if (incomplete) nodes.push(h('p', { class: 'help' }, `${incomplete} incomplete test${incomplete === 1 ? ' is' : 's are'} not ranked. See the Tests tab.`));
+  if (incomplete) nodes.push(h('p', { class: 'help' }, `${incomplete} incomplete test${incomplete === 1 ? ' is' : 's are'} not counted. See the Tests tab.`));
   return nodes;
 }
 
 function foodView(key) {
-  const tests = myTests().filter(t => normFood(t.food) === key);
-  if (!tests.length) return [h('p', null, 'No tests for this food.'), h('a', { class: 'btn secondary', href: '#/foods' }, 'Back to foods')];
-  return [h('h2', null, tests[0].food), tests.map(testRow), h('a', { class: 'btn secondary', href: '#/foods' }, 'Back to foods')];
+  const tests = myTests().filter(t => mealKey(t) === key);
+  if (!tests.length) return [h('p', null, 'No tests for this meal.'), h('a', { class: 'btn secondary', href: '#/foods/meals' }, 'Back to foods')];
+  return [h('h2', null, testLabel(tests[0])), tests.map(testRow), h('a', { class: 'btn secondary', href: '#/foods/meals' }, 'Back to foods')];
+}
+
+function ingredientView(key) {
+  const tests = myTests().filter(t => t.items.some(i => normFood(i) === key));
+  if (!tests.length) return [h('p', null, 'No tests contain this ingredient.'), h('a', { class: 'btn secondary', href: '#/foods' }, 'Back to foods')];
+  const name = tests[0].items.find(i => normFood(i) === key);
+  return [h('h2', null, name), h('p', { class: 'help' }, 'Tests containing this ingredient.'), tests.map(testRow), h('a', { class: 'btn secondary', href: '#/foods' }, 'Back to foods')];
 }
 
 function testView(id) {
   const t = state.tests.find(x => x.id === id);
   if (!t) return [h('p', null, 'Test not found.'), h('a', { class: 'btn secondary', href: '#/tests' }, 'Back')];
   const { match, score } = evalT(t);
-  const nodes = [h('h2', null, t.food),
+  const nodes = [h('h2', null, testLabel(t)),
+    t.mealName && t.items.length ? h('p', { class: 'help' }, t.items.join(', ')) : null,
     h('p', { class: 'help' }, `${fmtDT(t.start)}${t.note ? ' - ' + t.note : ''}`)];
 
   // prick schedule
@@ -205,7 +236,7 @@ function testView(id) {
         items[i].className = p.at <= now ? 'done' : '';
         if (p.at <= now && now - p.at < 2 * 60000 && !fired.has(p.at)) {
           fired.add(p.at);
-          notify(`Prick now: ${t.food}`, p.offsetMin === 0 ? 'Baseline reading before you eat' : `${p.offsetMin} min after the first bite`);
+          notify(`Prick now: ${testLabel(t)}`, p.offsetMin === 0 ? 'Baseline reading before you eat' : `${p.offsetMin} min after the first bite`);
         }
       });
       const nxi = sched.findIndex(p => p.at > now);
@@ -246,7 +277,7 @@ function testView(id) {
   nodes.push(h('div', { class: 'actions' },
     h('a', { class: 'btn secondary', href: `#/edit/${t.id}` }, 'Edit'),
     h('button', { class: 'btn danger', onclick: async () => {
-      if (!confirm(`Delete the test "${t.food}"? This cannot be undone.`)) return;
+      if (!confirm(`Delete the test "${testLabel(t)}"? This cannot be undone.`)) return;
       try { await db.del('tests', t.id); await reload(); location.hash = '#/tests'; } catch (e) { toast(e.message); }
     } }, 'Delete')));
   return nodes;
@@ -267,23 +298,44 @@ function testFormView(id) {
   const existing = id ? state.tests.find(x => x.id === id) : null;
   if (id && !existing) return [h('p', null, 'Test not found.')];
   const names = foodNames(state.tests.filter(t => t.profileId === profile().id));
-  const food = h('input', { id: 'food', required: true, list: 'foods', autocomplete: 'off', autocapitalize: 'sentences', value: existing?.food || '' });
+  let items = normItems(existing?.items || []);
+  const mealName = h('input', { id: 'mealname', autocomplete: 'off', autocapitalize: 'sentences', maxlength: 60, value: existing?.mealName || '' });
+  const food = h('input', { id: 'food', list: 'foods', autocomplete: 'off', autocapitalize: 'sentences', enterkeyhint: 'done' });
+  const chips = h('ul', { class: 'chips', 'aria-label': 'Foods in this meal' });
   const start = h('input', { id: 'start', type: 'datetime-local', required: true, value: toLocalInput(existing?.start ?? Date.now()) });
   const note = h('textarea', { id: 'note', rows: 2 }, existing?.note || '');
   const err = h('div', { role: 'alert' });
-  const form = h('form', { onsubmit: async e => {
+  const drawChips = () => chips.replaceChildren(...items.map(it => h('li', null, h('span', null, it),
+    h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${it}`, onclick: () => { items = items.filter(x => x !== it); drawChips(); } }, '×'))));
+  const addItem = () => {
+    const before = items.length;
+    items = normItems([...items, food.value]);
+    if (food.value.trim() && items.length === before) { /* duplicate: just clear */ }
+    food.value = ''; err.replaceChildren(); drawChips(); food.focus();
+  };
+  food.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addItem(); } });
+  drawChips();
+  const form = h('form', { novalidate: true, onsubmit: async e => {
     e.preventDefault();
     const st = new Date(start.value).getTime();
-    if (!food.value.trim()) { err.replaceChildren(h('p', { class: 'help' }, 'Enter a food name.')); return; }
-    if (!Number.isFinite(st)) { err.replaceChildren(h('p', { class: 'help' }, 'Enter a valid start time.')); return; }
-    // reuse the existing spelling of a food that matches case-insensitively
-    const match = names.find(n => normFood(n) === normFood(food.value));
+    const all = normItems([...items, food.value]);   // include text typed but not added
+    if (!all.length) { err.replaceChildren(h('p', { class: 'help err-text' }, 'Add at least one food.')); food.focus(); return; }
+    if (!Number.isFinite(st)) { err.replaceChildren(h('p', { class: 'help err-text' }, 'Enter a valid start time.')); return; }
+    // reuse the existing spelling of a food seen before in this profile
+    const known = new Map(names.map(n => [normFood(n), n]));
+    const finalItems = normItems(all.map(n => known.get(normFood(n)) || n));
     const rec = existing ? { ...existing } : { id: uid(), profileId: profile().id, created: Date.now() };
-    Object.assign(rec, { food: match || food.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim() });
+    delete rec.food;
+    Object.assign(rec, { items: finalItems, mealName: mealName.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim() });
     try { await db.put('tests', rec); await reload(); location.hash = `#/test/${rec.id}`; }
     catch (ex) { err.replaceChildren(errorCard(ex)); }
   } },
-    h('label', { for: 'food' }, 'Food'), food, h('datalist', { id: 'foods' }, names.map(n => h('option', { value: n }))),
+    h('label', { for: 'mealname' }, 'Meal name (optional)'), mealName,
+    h('label', { for: 'food' }, 'Foods in this meal'),
+    h('div', { class: 'addrow' }, food, h('button', { type: 'button', class: 'btn secondary small', onclick: addItem }, 'Add')),
+    h('datalist', { id: 'foods' }, names.map(n => h('option', { value: n }))),
+    chips,
+    h('p', { class: 'help' }, 'List every food, one at a time. Testing a single food gives the clearest answer.'),
     h('label', { for: 'start' }, 'Start time (first bite)'), start,
     h('p', { class: 'help' }, 'Prick your finger just before eating for the baseline.'),
     h('label', { for: 'note' }, 'Note (optional)'), note, err,
@@ -329,6 +381,7 @@ function importView() {
 function foodHelp() {
   return h('ol', { class: 'plain' },
     h('li', null, 'Test one food at least 3 hours after your last meal.'),
+    h('li', null, 'You can list every food in a meal. Testing a single food on its own gives the clearest answer.'),
     h('li', null, 'Prick before eating (baseline), then 30, 60 and 120 minutes after the first bite.'),
     h('li', null, 'Tag each reading on the meter with your name (Chris or Lea) so it goes to the right person.'),
     h('li', null, 'Repeat each food 2-3 times. One test is only a hint; averages are more reliable.'),
@@ -447,8 +500,9 @@ function route() {
   const [, a, b] = (location.hash || '#/').split('/');
   switch (a) {
     case 'tests': return ['tests', testsView()];
-    case 'foods': return ['foods', foodsView()];
+    case 'foods': return ['foods', foodsView(b === 'meals' ? 'meals' : 'ingredients')];
     case 'food': return ['foods', foodView(decodeURIComponent(b || ''))];
+    case 'ingredient': return ['foods', ingredientView(decodeURIComponent(b || ''))];
     case 'test': return ['tests', testView(b)];
     case 'new': return ['home', testFormView()];
     case 'edit': return ['tests', testFormView(b)];

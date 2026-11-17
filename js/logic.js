@@ -13,7 +13,8 @@ export const CONSTANTS = {
   KEY_WINDOW_MIN: 45,        // one post reading must lie in [45, 75]
   KEY_WINDOW_MAX: 75,
   MIN_POST_READINGS: 2,
-  LOW_CONFIDENCE_BELOW: 2,   // fewer complete tests than this -> low confidence
+  LOW_CONFIDENCE_BELOW: 2,   // fewer complete tests than this -> low confidence (meals)
+  INGREDIENT_LOW_CONFIDENCE_BELOW: 3, // same, for single ingredients
   PRICK_OFFSETS_MIN: [0, 30, 60, 120],
   MGDL_PER_MMOL: 18.016,
   BACKUP_WARN_DAYS: 14,
@@ -151,6 +152,49 @@ export function normFood(name) {
   return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+/** Clean a list of food names: trim, collapse spaces, drop blanks, de-dupe case-insensitively (first spelling wins). */
+export function normItems(list) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(list) ? list : []) {
+    const clean = String(raw ?? '').trim().replace(/\s+/g, ' ');
+    const k = normFood(clean);
+    if (!k || seen.has(k)) continue;
+    seen.add(k); out.push(clean);
+  }
+  return out;
+}
+
+/** Old test {food} -> {items:[food], mealName:''}. Returns the same object if nothing to do. */
+export function migrateTest(t) {
+  if (!t || typeof t !== 'object') return t;
+  if (Array.isArray(t.items)) {
+    if ('food' in t) { const { food, ...rest } = t; return rest; }
+    return t;
+  }
+  if (typeof t.food === 'string') {
+    const { food, ...rest } = t;
+    return { ...rest, items: normItems([food]), mealName: '' };
+  }
+  return t;
+}
+
+export const needsMigration = t => !!t && typeof t === 'object' && (!Array.isArray(t.items) || 'food' in t);
+
+/** Name shown for a test: mealName if set, else items joined with ", ". */
+export function testLabel(t) {
+  const m = String(t?.mealName ?? '').trim().replace(/\s+/g, ' ');
+  if (m) return m;
+  return (Array.isArray(t?.items) ? t.items : []).join(', ');
+}
+
+/** Key for grouping tests into "meals": the meal name, or the sorted normalised items. */
+export function mealKey(t) {
+  const m = normFood(t?.mealName);
+  if (m) return m;
+  return normItems(t?.items).map(normFood).sort().join(' + ');
+}
+
 /** Glucose readings belonging to a profile, offset applied (ts shifted by offsetMin). */
 export function profileGlucose(readings, profile, offsetMin = 0) {
   const tag = profile.tag.toLowerCase();
@@ -215,14 +259,14 @@ export function evaluateTest(test, allReadings, profile, offsetMin = 0) {
 }
 
 /**
- * Rank foods. `items` = [{food, start, rise|null}] (rise null/undefined = incomplete, excluded).
+ * Rank meals. `items` = [{food (label), key? (grouping key, default normFood(food)), start, rise|null}] (rise null/undefined = incomplete, excluded).
  * Sorted lowest average rise first.
  */
 export function rankFoods(items) {
   const groups = new Map();
   for (const it of items) {
     if (it.rise == null) continue;
-    const key = normFood(it.food);
+    const key = it.key ?? normFood(it.food);
     if (!key) continue;
     let g = groups.get(key);
     if (!g) { g = { key, name: it.food.trim(), latest: it.start ?? 0, rises: [] }; groups.set(key, g); }
@@ -239,6 +283,51 @@ export function rankFoods(items) {
     };
   });
   out.sort((a, b) => a.rawAvg - b.rawAvg || b.count - a.count || a.name.localeCompare(b.name));
+  return out;
+}
+
+/**
+ * Rank single ingredients across mixed meals. `tests` = [{items: string[], rise: number|null|undefined}]
+ * (rise null/undefined = incomplete, excluded entirely, including from the "without" average).
+ * Sorted by average rise ascending (best first).
+ */
+export function rankIngredients(tests) {
+  const done = [];
+  for (const t of tests) {
+    if (t.rise == null) continue;
+    const names = normItems(t.items);
+    if (!names.length) continue;
+    done.push({ names, keys: new Set(names.map(normFood)), rise: t.rise, start: t.start ?? 0 });
+  }
+  const groups = new Map();
+  for (const t of done) {
+    t.names.forEach(name => {
+      const k = normFood(name);
+      let g = groups.get(k);
+      if (!g) { g = { key: k, name, latest: -Infinity }; groups.set(k, g); }
+      if (t.start >= g.latest) { g.latest = t.start; g.name = name; }
+    });
+  }
+  const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const out = [];
+  for (const g of groups.values()) {
+    const withIt = done.filter(t => t.keys.has(g.key));
+    const without = done.filter(t => !t.keys.has(g.key));
+    const solo = withIt.filter(t => t.keys.size === 1);
+    const rawAvg = mean(withIt.map(t => t.rise));
+    const avgRise = round1(rawAvg);
+    const avgRiseWithout = without.length ? round1(mean(without.map(t => t.rise))) : null;
+    out.push({
+      key: g.key, name: g.name, n: withIt.length, avgRise, rawAvg,
+      rating: ratingFor(avgRise),
+      avgRiseWithout,
+      diff: avgRiseWithout == null ? null : round1(rawAvg - mean(without.map(t => t.rise))),
+      soloN: solo.length,
+      soloAvgRise: solo.length ? round1(mean(solo.map(t => t.rise))) : null,
+      lowConfidence: withIt.length < CONSTANTS.INGREDIENT_LOW_CONFIDENCE_BELOW,
+    });
+  }
+  out.sort((a, b) => a.rawAvg - b.rawAvg || b.n - a.n || a.name.localeCompare(b.name));
   return out;
 }
 
@@ -263,25 +352,25 @@ export function formatCountdown(ms) {
   return h ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`;
 }
 
-/** Distinct food names (most recent spelling), for autocomplete. */
+/** Distinct item names across tests (most recent spelling), for autocomplete. */
 export function foodNames(tests) {
   const map = new Map();
   for (const t of [...tests].sort((a, b) => a.start - b.start)) {
-    const k = normFood(t.food);
-    if (k) map.set(k, t.food.trim());
+    for (const name of normItems(migrateTest(t).items)) map.set(normFood(name), name);
   }
   return [...map.values()].sort((a, b) => a.localeCompare(b));
 }
 
 // ---- Backup -------------------------------------------------------------
 
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;   // v2: tests have items[] + mealName; v1 tests have food
+export const SUPPORTED_BACKUP_VERSIONS = [1, 2];
 
 export function validateBackup(obj) {
   const bad = msg => ({ ok: false, error: msg });
   if (!obj || typeof obj !== 'object') return bad('Not a backup file.');
   if (obj.app !== 'glucose-track') return bad('This file is not a Glucose Track backup.');
-  if (obj.version !== BACKUP_VERSION) return bad('Unsupported backup version: ' + obj.version);
+  if (!SUPPORTED_BACKUP_VERSIONS.includes(obj.version)) return bad('Unsupported backup version: ' + obj.version);
   if (!Array.isArray(obj.profiles) || !obj.profiles.length ||
       !obj.profiles.every(p => p && typeof p.id === 'string' && typeof p.name === 'string' && typeof p.tag === 'string')) {
     return bad('Backup has invalid profiles.');
@@ -289,8 +378,11 @@ export function validateBackup(obj) {
   if (!obj.settings || typeof obj.settings !== 'object' || !Number.isFinite(Number(obj.settings.offsetMin))) {
     return bad('Backup has invalid settings.');
   }
+  const foodOk = obj.version === 1
+    ? t => typeof t.food === 'string'
+    : t => Array.isArray(t.items) && t.items.length > 0 && t.items.every(i => typeof i === 'string');
   if (!Array.isArray(obj.tests) || !obj.tests.every(t => t && typeof t.id === 'string' &&
-      typeof t.profileId === 'string' && typeof t.food === 'string' && Number.isFinite(t.start))) {
+      typeof t.profileId === 'string' && foodOk(t) && Number.isFinite(t.start))) {
     return bad('Backup has invalid tests.');
   }
   if (!Array.isArray(obj.readings) || !obj.readings.every(r => r && typeof r.id === 'string' &&
@@ -298,6 +390,11 @@ export function validateBackup(obj) {
     return bad('Backup has invalid readings.');
   }
   return { ok: true };
+}
+
+/** Bring a validated backup (any supported version) to the current shape. */
+export function migrateBackup(obj) {
+  return { ...obj, version: BACKUP_VERSION, tests: obj.tests.map(migrateTest) };
 }
 
 export function daysSince(ts, now) {

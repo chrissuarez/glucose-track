@@ -1,5 +1,5 @@
 // IndexedDB wrapper. Every failure becomes a StorageError with a readable message.
-import { DEFAULT_PROFILES, BACKUP_VERSION } from './logic.js';
+import { DEFAULT_PROFILES, BACKUP_VERSION, migrateTest, needsMigration, migrateBackup } from './logic.js';
 
 const DB_NAME = 'glucose-track';
 const DB_VERSION = 1;
@@ -71,10 +71,17 @@ export async function getMeta(key, fallback = null) {
 export const setMeta = (key, value) => put('meta', { key, value });
 
 export async function loadAll() {
-  const [profiles, settings, selected, lastBackup, tests, readings] = await Promise.all([
+  let [profiles, settings, selected, lastBackup, tests, readings] = await Promise.all([
     getMeta('profiles', null), getMeta('settings', null), getMeta('selectedProfile', null),
     getMeta('lastBackup', null), getAll('tests'), getAll('readings'),
   ]);
+  const stale = tests.filter(needsMigration);
+  if (stale.length) {
+    const migrated = stale.map(migrateTest);
+    await putMany('tests', migrated);        // persist the migration
+    const byId = new Map(migrated.map(t => [t.id, t]));
+    tests = tests.map(t => byId.get(t.id) || t);
+  }
   return {
     profiles: profiles || DEFAULT_PROFILES.map(p => ({ ...p })),
     settings: settings || { offsetMin: 0 },
@@ -94,6 +101,7 @@ export async function exportBackup() {
 
 /** Replace everything with backup content in one transaction. */
 export function restoreBackup(b) {
+  b = migrateBackup(b);
   return tx(STORES, 'readwrite', t => {
     t.objectStore('readings').clear();
     t.objectStore('tests').clear();

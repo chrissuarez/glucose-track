@@ -6,6 +6,7 @@ import {
   MIN, CONSTANTS, DEFAULT_PROFILES, parseCsv, parseTags, toMmol, parseReadingsCsv, dedupeReadings,
   importSummary, profileGlucose, matchTest, scoreTest, ratingFor, evaluateTest, rankFoods,
   prickSchedule, nextPrick, formatCountdown, foodNames, validateBackup, normFood,
+  normItems, migrateTest, migrateBackup, testLabel, mealKey, rankIngredients, BACKUP_VERSION,
 } from '../js/logic.js';
 import { readReadingsCsvFromZip } from '../js/zip.js';
 
@@ -211,7 +212,7 @@ test('schedule and countdown', () => {
 
 test('food names / normFood', () => {
   assert.equal(normFood('  Rice   Bowl '), 'rice bowl');
-  assert.deepEqual(foodNames([{ food: 'Rice', start: 1 }, { food: 'rice', start: 2 }, { food: 'Eggs', start: 0 }]), ['Eggs', 'rice']);
+  assert.deepEqual(foodNames([{ items: ['Rice'], start: 1 }, { items: ['rice', 'Salt'], start: 2 }, { food: 'Eggs', start: 0 }]), ['Eggs', 'rice', 'Salt']);
 });
 
 test('backup validation', () => {
@@ -262,4 +263,81 @@ test('zip reader: deflated and stored, picks first *readings.csv', async () => {
   }
   await assert.rejects(readReadingsCsvFromZip(makeZip([['a.txt', 'x']], false)), /No readings\.csv/);
   await assert.rejects(readReadingsCsvFromZip(new TextEncoder().encode('not a zip at all, definitely').buffer), /valid zip/);
+});
+
+
+// ---- multi-item meals ----
+test('normItems trims, collapses, de-dupes case-insensitively keeping first spelling', () => {
+  assert.deepEqual(normItems(['  Rice ', 'rice', 'Black   beans', 'BLACK BEANS', '', '  ', 'Egg']), ['Rice', 'Black beans', 'Egg']);
+  assert.deepEqual(normItems(null), []);
+});
+
+test('migrateTest: old food becomes items + empty mealName; new tests untouched', () => {
+  const m = migrateTest({ id: 'a', food: ' Porridge ', start: 1, note: 'n' });
+  assert.deepEqual(m, { id: 'a', start: 1, note: 'n', items: ['Porridge'], mealName: '' });
+  assert.equal('food' in m, false);
+  const fresh = { id: 'b', items: ['x', 'y'], mealName: 'Lunch', start: 2 };
+  assert.equal(migrateTest(fresh), fresh);
+});
+
+test('old (v1) backups validate and migrate; v2 validates; unknown version and empty items rejected', () => {
+  const base = { app: 'glucose-track', profiles: DEFAULT_PROFILES, settings: { offsetMin: 0 }, readings: [] };
+  const v1 = { ...base, version: 1, tests: [{ id: 't', profileId: 'chris', food: 'Rice', start: 1 }] };
+  assert.equal(validateBackup(v1).ok, true);
+  const mig = migrateBackup(v1);
+  assert.equal(mig.version, BACKUP_VERSION);
+  assert.deepEqual(mig.tests[0].items, ['Rice']);
+  assert.equal(mig.tests[0].mealName, '');
+  assert.equal(BACKUP_VERSION, 2);
+  const v2 = { ...base, version: 2, tests: [{ id: 't', profileId: 'chris', items: ['Rice', 'Egg'], mealName: '', start: 1 }] };
+  assert.equal(validateBackup(v2).ok, true);
+  assert.equal(validateBackup({ ...v2, tests: [{ ...v2.tests[0], items: [] }] }).ok, false);
+  assert.equal(validateBackup({ ...v2, tests: [{ id: 't', profileId: 'chris', food: 'x', start: 1 }] }).ok, false);
+  assert.equal(validateBackup({ ...v2, version: 3 }).ok, false);
+});
+
+test('testLabel and mealKey', () => {
+  assert.equal(testLabel({ mealName: 'Lunch', items: ['a', 'b'] }), 'Lunch');
+  assert.equal(testLabel({ mealName: '  ', items: ['Rice', 'Egg'] }), 'Rice, Egg');
+  assert.equal(mealKey({ mealName: ' Lunch ', items: ['a'] }), 'lunch');
+  assert.equal(mealKey({ items: ['Rice', 'egg'] }), mealKey({ items: ['EGG', 'rice'] }));
+  assert.notEqual(mealKey({ items: ['Rice'] }), mealKey({ items: ['Rice', 'Egg'] }));
+});
+
+test('rankIngredients: averages, without, diff, solo, exclusions, ordering, nulls', () => {
+  const tests = [
+    { items: ['Rice', 'Chicken'], rise: 2.0, start: 1 },
+    { items: ['rice'], rise: 3.0, start: 2 },
+    { items: ['Chicken', 'Salad'], rise: 0.4, start: 3 },
+    { items: ['Salad'], rise: 0.2, start: 4 },
+    { items: ['Rice', 'Salad'], rise: null, start: 5 },   // incomplete: ignored everywhere
+  ];
+  const r = rankIngredients(tests);
+  assert.deepEqual(r.map(x => x.key), ['salad', 'chicken', 'rice']);
+  const rice = r.find(x => x.key === 'rice');
+  assert.equal(rice.n, 2);
+  assert.equal(rice.avgRise, 2.5);
+  assert.equal(rice.avgRiseWithout, 0.3);
+  assert.equal(rice.diff, 2.2);
+  assert.equal(rice.soloN, 1);
+  assert.equal(rice.soloAvgRise, 3.0);
+  assert.equal(rice.rating, 'red');
+  assert.equal(rice.lowConfidence, true);
+  const chicken = r.find(x => x.key === 'chicken');
+  assert.equal(chicken.avgRise, 1.2);
+  assert.equal(chicken.soloN, 0);
+  assert.equal(chicken.soloAvgRise, null);
+  assert.equal(chicken.avgRiseWithout, 1.6);
+  assert.equal(chicken.diff, -0.4);
+  assert.equal(r.find(x => x.key === 'salad').n, 2);
+});
+
+test('rankIngredients: nulls when not computable, confidence threshold', () => {
+  const one = rankIngredients([{ items: ['Egg', 'Toast'], rise: 1.0 }]);
+  assert.equal(one.length, 2);
+  for (const x of one) { assert.equal(x.avgRiseWithout, null); assert.equal(x.diff, null); assert.equal(x.soloAvgRise, null); }
+  assert.deepEqual(rankIngredients([{ items: ['Egg'], rise: null }]), []);
+  const three = rankIngredients([1, 2, 3].map(i => ({ items: ['Egg'], rise: 0.5, start: i })));
+  assert.equal(three[0].lowConfidence, false);
+  assert.equal(three[0].soloN, 3);
 });
