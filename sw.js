@@ -1,5 +1,5 @@
 // Cache the app shell so the app works offline. Bump CACHE when shell files change.
-const CACHE = 'glucose-track-shell-v1';
+const CACHE = 'glucose-track-shell-v2';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/logic.js', 'js/db.js', 'js/zip.js',
@@ -7,7 +7,7 @@ const SHELL = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

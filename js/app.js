@@ -1,6 +1,6 @@
 import {
   MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, prickSchedule,
-  nextPrick, formatCountdown, foodNames, normFood, validateBackup, daysSince, round1,
+  formatCountdown, foodNames, normFood, validateBackup, daysSince, round1,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -208,8 +208,9 @@ function testView(id) {
           notify(`Prick now: ${t.food}`, p.offsetMin === 0 ? 'Baseline reading before you eat' : `${p.offsetMin} min after the first bite`);
         }
       });
-      const nx = nextPrick(t.start, now);
-      if (nx) { items[sched.indexOf(nx)].className = 'next'; countdown.textContent = formatCountdown(nx.at - now); nextLabel.textContent = `until: ${nx.label} (${fmtTime(nx.at)})`; }
+      const nxi = sched.findIndex(p => p.at > now);
+      const nx = nxi >= 0 ? sched[nxi] : null;
+      if (nx) { items[nxi].className = 'next'; countdown.textContent = formatCountdown(nx.at - now); nextLabel.textContent = `until: ${nx.label} (${fmtTime(nx.at)})`; }
       else { countdown.textContent = 'Done'; nextLabel.textContent = 'All pricks done. Tag each reading with your name on the meter.'; }
     };
     tick();
