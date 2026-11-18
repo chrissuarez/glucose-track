@@ -198,6 +198,7 @@ function foodsView(tab) {
     }
   }
   if (incomplete) nodes.push(h('p', { class: 'help' }, `${incomplete} incomplete test${incomplete === 1 ? ' is' : 's are'} not counted. See the Tests tab.`));
+  nodes.push(h('p', { class: 'help' }, 'Red or amber foods? See ', h('a', { href: '#/help' }, 'ways to lower a spike'), '.'));
   return nodes;
 }
 
@@ -415,25 +416,85 @@ function importView() {
 }
 
 function foodHelp() {
-  return h('ol', { class: 'plain' },
-    h('li', null, 'Test one food at least 3 hours after your last meal.'),
-    h('li', null, 'You can list every food in a meal. Testing a single food on its own gives the clearest answer.'),
-    h('li', null, 'Prick before eating (baseline), then 30, 60 and 120 minutes after the first bite.'),
-    h('li', null, 'Tag each reading on the meter with your name (Chris or Lea) so it goes to the right person.'),
-    h('li', null, 'Repeat each food 2-3 times. One test is only a hint; averages are more reliable.'),
-    h('li', null, 'No Keto-Mojo app? Type each reading into the test screen right after you prick.'),
-    h('li', null, 'Import the meter export into the app after the test. The app matches readings to tests by time.'),
-    h('li', null, 'Add this app to your home screen. On iPhone, Safari may delete data from sites not opened for 7 days unless the app has been added to the home screen. Make backups regularly anyway.'));
+  const steps = [
+    ['Fast 3 hours', 'Test one food at least 3 hours after your last meal. A meal can list several foods, but one food alone gives the clearest answer.'],
+    ['Prick 4 times', 'Before eating (baseline), then 30, 60 and 120 minutes after the first bite.'],
+    ['Tag your readings', 'Type your name (Chris or Lea) as the tag on the meter so it goes to the right person.'],
+    ['No Keto-Mojo app?', 'Type each reading into the test screen right after you prick.'],
+    ['Import the export', 'After the test, import the meter export. The app matches readings to tests by time.'],
+    ['Repeat 2-3 times', 'One test is only a hint; averages are more reliable.'],
+    ['Add to home screen', 'On iPhone, Safari may delete data from sites not opened for 7 days unless the app is on the home screen. Make backups regularly anyway.'],
+  ];
+  const offs = CONSTANTS.PRICK_OFFSETS_MIN;
+  const last = offs[offs.length - 1];
+  return [
+    h('ol', { class: 'steps' }, steps.map(([t, d]) =>
+      h('li', null, h('strong', null, t), h('span', { class: 'sub' }, d)))),
+    h('div', { class: 'timeline', role: 'img', 'aria-label': `Four pricks: ${offs.map((m, i) => i ? `${m} minutes` : 'before eating').join(', ')}` },
+      h('div', { class: 'tl-line' }),
+      offs.map((m, i) => h('div', { class: 'tl-pt', style: `left:${m / last * 100}%` },
+        h('span', { class: 'tl-dot' }),
+        h('span', { class: 'tl-lbl' }, i === 0 ? 'Before' : `${m} min`)))),
+  ];
+}
+function exampleCurve() {
+  const txt = (x, y, anchor, t, cls) => s('text', { x, y, 'text-anchor': anchor, class: cls || 'ch-t' }, t);
+  return h('figure', { class: 'chart' },
+    s('svg', { viewBox: '0 0 320 160', width: '100%', role: 'img',
+      'aria-label': 'Example glucose curve: flat baseline, rises to a peak at about 45 minutes, then falls back near baseline by 120 minutes.' },
+      s('line', { x1: 40, y1: 120, x2: 306, y2: 120, class: 'ch-base' }),
+      s('line', { x1: 139, y1: 40, x2: 139, y2: 120, class: 'ch-guide' }),
+      s('path', { d: 'M40 120 C 70 120 90 60 139 40 C 175 28 200 105 304 117', class: 'ch-curve' }),
+      s('path', { d: 'M150 48 L150 112 M150 48 l-3 6 M150 48 l3 6 M150 112 l-3 -6 M150 112 l3 -6', class: 'ch-arrow' }),
+      s('circle', { cx: 139, cy: 40, r: 4, class: 'ch-dot' }),
+      s('circle', { cx: 304, cy: 117, r: 4, class: 'ch-dot' }),
+      txt(139, 30, 'middle', 'Peak', 'ch-t b'),
+      txt(158, 84, 'start', 'Rise', 'ch-t b'),
+      txt(40, 136, 'start', 'Baseline'),
+      txt(306, 136, 'end', 'Recovery'),
+      [[0, 40], [30, 106], [60, 172], [120, 304]].map(([m, x]) => txt(x, 154, m === 0 ? 'start' : m === 120 ? 'end' : 'middle', m === 0 ? '0 min' : String(m)))),
+    h('figcaption', null, 'Example only. Your curve will look different.'));
 }
 function helpView() {
+  const t = (cls, label, text, range) => h('div', { class: `rise-card ${cls}` },
+    h('span', { class: `badge ${cls}` }, label), h('span', { class: 'rc-range' }, range), h('span', null, text));
+  const G = CONSTANTS.GREEN_BELOW, A = CONSTANTS.AMBER_UP_TO;
+  const tips = [
+    ['🥚', 'Add protein or fat', 'Eggs, meat, cheese, yoghurt, nuts, olive oil slow the sugar down.'],
+    ['🥗', 'Add fibre', 'Vegetables, salad, beans, lentils.'],
+    ['🔀', 'Veg & protein first', 'Carbs (bread, rice, pasta) last.'],
+    ['🍚', 'Smaller carb portion', 'Half the rice gives a smaller spike.'],
+    ['🚶', 'Walk 10-15 min after', 'Start soon after you eat.'],
+    ['❄️', 'Cook, cool, reheat', 'Works for rice, pasta and potato.'],
+    ['🫙', 'Vinegar first', 'For example a salad with vinegar dressing before the meal.'],
+    ['🌾', 'Less processed', 'Whole oats, not instant; whole fruit, not juice.'],
+  ];
   return [h('h2', null, 'How to test'), foodHelp(),
+    h('h3', null, 'Example curve'), exampleCurve(),
     h('div', { class: 'card' }, h('strong', null, 'This is not medical advice. '),
       'Talk to a doctor or dietitian about your health and diet.'),
     h('h3', null, 'How results are scored'),
     h('ul', { class: 'plain' },
-      h('li', null, `Peak rise = highest reading in the 3 hours after eating minus your baseline.`),
-      h('li', null, `Green: under ${CONSTANTS.GREEN_BELOW}. Amber: ${CONSTANTS.GREEN_BELOW} to ${CONSTANTS.AMBER_UP_TO}. Red: over ${CONSTANTS.AMBER_UP_TO} mmol/L.`),
+      h('li', null, 'Peak rise = highest reading in the 3 hours after eating minus your baseline.'),
       h('li', null, 'A test is complete with a baseline, at least 2 readings after eating, and one of them 45-75 minutes after the first bite.')),
+    h('h3', null, 'What the rise means'),
+    h('div', { class: 'scale' },
+      h('div', { class: 'scale-bar', role: 'img', 'aria-label': `Scale in mmol/L: green under ${G}, amber ${G} to ${A}, red over ${A}` },
+        h('span', { class: 'seg green' }, 'Green'), h('span', { class: 'seg amber' }, 'Amber'), h('span', { class: 'seg red' }, 'Red')),
+      h('div', { class: 'scale-ticks' }, h('span', null, '0'), h('span', null, String(G)), h('span', null, String(A)), h('span', null, 'mmol/L'))),
+    h('div', { class: 'rise-cards' },
+      t('green', 'Green', 'Small bump - good for you', `under ${G}`),
+      t('amber', 'Amber', 'Medium bump - try the tips', `${G} to ${A}`),
+      t('red', 'Red', 'Big spike - try the tips or eat less', `over ${A}`)),
+    h('ul', { class: 'plain' },
+      h('li', null, h('strong', null, 'Time to peak: '), 'a very fast peak (about 30 minutes) means the sugar got into your blood quickly.'),
+      h('li', null, h('strong', null, 'Recovery: '), 'how long until you are back near your start level. Faster is better. "Not back to baseline" is less good.'),
+      h('li', null, h('strong', null, 'Test 2+ times (3 for an ingredient) '), 'before you trust the result. One test can be a fluke.')),
+    h('h3', { id: 'tips' }, 'Ways to lower a spike'),
+    h('div', { class: 'tips' }, tips.map(([i, ti, d]) =>
+      h('div', { class: 'tip' }, h('span', { class: 'tip-ico', 'aria-hidden': 'true' }, i), h('strong', null, ti), h('span', { class: 'sub' }, d)))),
+    h('div', { class: 'card hl' }, h('strong', null, 'Test it: '),
+      'test the food alone, then with one change. The Ingredients tab shows what raises or lowers your rise.'),
     h('p', null, h('a', { href: '#/settings' }, 'Back to settings'))];
 }
 
