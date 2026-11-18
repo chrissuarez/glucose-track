@@ -454,3 +454,182 @@ test('backup validation accepts the optional sharedFrom field', () => {
   assert.equal(validateBackup(ok).ok, true);
   assert.equal(migrateBackup(ok).tests[0].sharedFrom, 'abc');
 });
+
+// ---- Sync between phones ----
+import { validateSync, mergeSync, applyMerge, buildSync, mergeTombstones, addTombstone, TOMBSTONE_MAX, linkedTests, makeLinkedTest, readingKey } from '../js/logic.js';
+
+const T = (id, profileId, extra = {}) => ({ id, profileId, items: ['Rice'], mealName: '', start: 1000, note: '', created: 1000, ...extra });
+const R = (id, ts, value = 5, tags = ['chris']) => ({ id, ts, type: 'glucose', value, unit: 'mmoll', tags });
+const MR = (id, created, profileId = 'lea') => ({ id, source: 'manual', profileId, type: 'glucose', value: 5.5, time: created, created });
+const phone = (o = {}) => ({ tests: [], readings: [], deleted: [], settings: { offsetMin: 0 }, ...o });
+const syncOf = p => buildSync(p, new Date(0));
+const sync = (a, b) => applyMerge(a, mergeSync(a, syncOf(b)));   // a imports b's file
+const ids = arr => arr.map(x => x.id).sort();
+
+test('reading ids from the CSV are deterministic and do not depend on time zone', () => {
+  const csv = 'reading_timestamp,reading_type,reading_value,reading_unit,tags\n2026-01-01 10:00:00,glucose,90,mg/dL,"[\'chris\']"\n';
+  const a = parseReadingsCsv(csv).readings[0], b = parseReadingsCsv(csv).readings[0];
+  assert.equal(a.id, b.id);
+  assert.equal(a.id, 'gen-2026-01-01 10:00:00-glucose-90');
+  const full = parseReadingsCsv(fx('readings-user.csv')).readings;
+  assert.deepEqual(full.map(r => r.id), parseReadingsCsv(fx('readings-user.csv')).readings.map(r => r.id));
+});
+
+test('dedupeReadings also skips the same imported reading under an old id', () => {
+  const old = R('gen-old', 5000, 5);
+  const { fresh, duplicates } = dedupeReadings([R('gen-new', 5000, 5), R('x', 6000)], [old.id], [old]);
+  assert.deepEqual(fresh.map(r => r.id), ['x']); assert.equal(duplicates, 1);
+  assert.equal(readingKey(MR('m', 1)), null);
+});
+
+test('sync: data unique to each phone is kept on both sides', () => {
+  const chris = phone({ tests: [T('weekend', 'chris')], readings: [R('r1', 1), MR('m-c', 2, 'chris')] });
+  const lea = phone({ tests: [T('lunch', 'lea')], readings: [R('r2', 3, 5, ['lea'])] });
+  const lea2 = sync(lea, chris), chris2 = sync(chris, lea);
+  assert.deepEqual(ids(lea2.tests), ['lunch', 'weekend']);
+  assert.deepEqual(ids(chris2.tests), ['lunch', 'weekend']);
+  assert.deepEqual(ids(lea2.readings), ['m-c', 'r1', 'r2']);
+  assert.deepEqual(ids(chris2.readings), ids(lea2.readings));
+  const s = mergeSync(lea, syncOf(chris)).summary;
+  assert.deepEqual(s, { newTests: 1, updatedTests: 0, newReadings: 2, removed: 0, skipped: 0 });
+});
+
+test('sync: newer edit wins, older edit is ignored, both directions', () => {
+  const a = phone({ tests: [T('t', 'chris', { note: 'old', updated: 2000 })] });
+  const b = phone({ tests: [T('t', 'chris', { note: 'new', updated: 3000 })] });
+  assert.equal(sync(a, b).tests[0].note, 'new');
+  assert.equal(sync(b, a).tests[0].note, 'new');
+  assert.equal(mergeSync(a, syncOf(b)).summary.updatedTests, 1);
+  assert.equal(mergeSync(b, syncOf(a)).putTests.length, 0);
+  // fallback to created, then start
+  const c = phone({ tests: [{ id: 'u', profileId: 'lea', items: ['A'], start: 10 }] });
+  const d = phone({ tests: [{ id: 'u', profileId: 'lea', items: ['B'], start: 10, created: 50 }] });
+  assert.deepEqual(sync(c, d).tests[0].items, ['B']);
+  // equal stamps, different content: both phones pick the same one
+  const e = phone({ tests: [T('v', 'lea', { note: 'x', updated: 5 })] }), f = phone({ tests: [T('v', 'lea', { note: 'y', updated: 5 })] });
+  assert.equal(sync(e, f).tests[0].note, sync(f, e).tests[0].note);
+});
+
+test('sync: readings are never overwritten', () => {
+  const a = phone({ readings: [R('r', 1, 5)] }), b = phone({ readings: [R('r', 1, 9)] });
+  assert.equal(sync(a, b).readings[0].value, 5);
+});
+
+test('sync: same imported reading under a different id is skipped as duplicate', () => {
+  const a = phone({ readings: [R('gen-old', 1, 5)] }), b = phone({ readings: [R('gen-new', 1, 5)] });
+  const m = mergeSync(a, syncOf(b));
+  assert.equal(m.putReadings.length, 0); assert.equal(m.summary.skipped, 1);
+});
+
+test('sync: tombstone deletes the record on the other phone', () => {
+  const a = phone({ tests: [T('t', 'chris', { updated: 100 })], readings: [MR('m-1', 100)] });
+  const b = phone({ deleted: [{ store: 'tests', id: 't', at: 200 }, { store: 'readings', id: 'm-1', at: 200 }] });
+  const m = mergeSync(a, syncOf(b));
+  assert.deepEqual(m.deleteTests, ['t']); assert.deepEqual(m.deleteReadings, ['m-1']);
+  assert.equal(m.summary.removed, 2);
+  const a2 = applyMerge(a, m);
+  assert.equal(a2.tests.length, 0); assert.equal(a2.readings.length, 0);
+  assert.equal(a2.deleted.length, 2);
+});
+
+test('sync: a tombstone beats re-adding the record (either side holds it)', () => {
+  // b deleted it; a still has it and sends it back: b must not re-add
+  const a = phone({ tests: [T('t', 'chris', { updated: 100 })] });
+  const b = phone({ deleted: [{ store: 'tests', id: 't', at: 200 }] });
+  assert.equal(sync(b, a).tests.length, 0);
+  // incoming tombstone + incoming record (stale file): not added
+  const c = phone();
+  const file = { ...syncOf(a), deleted: b.deleted };
+  assert.equal(mergeSync(c, file).putTests.length, 0);
+});
+
+test('sync: a local edit made after the delete survives', () => {
+  const a = phone({ tests: [T('t', 'chris', { note: 'edited', updated: 300 })] });
+  const b = phone({ deleted: [{ store: 'tests', id: 't', at: 200 }] });
+  const m = mergeSync(a, syncOf(b));
+  assert.deepEqual(m.deleteTests, []);
+  // and symmetric: the edited test comes back to the phone that deleted it
+  assert.equal(sync(b, a).tests[0].note, 'edited');
+});
+
+test('tombstones: union keeps latest per id and drops the oldest over the limit', () => {
+  const m = mergeTombstones([{ store: 'tests', id: 'a', at: 1 }], [{ store: 'tests', id: 'a', at: 5 }, { store: 'readings', id: 'a', at: 2 }, { bad: 1 }]);
+  assert.deepEqual(m, [{ store: 'readings', id: 'a', at: 2 }, { store: 'tests', id: 'a', at: 5 }]);
+  let list = [];
+  for (let i = 0; i < TOMBSTONE_MAX + 5; i++) list = addTombstone(list, 'tests', 'x' + i, i);
+  assert.equal(list.length, TOMBSTONE_MAX);
+  assert.equal(list[0].id, 'x5');
+});
+
+test('sync: shared meal arriving by link and by sync gives one test per person', () => {
+  const orig = T('X', 'chris', { updated: 10 });
+  const copyOnChris = makeLinkedTest(orig, 'Z', 'lea', 10);
+  assert.equal(copyOnChris.sharedFrom, 'X'); assert.equal(copyOnChris.profileId, 'lea');
+  const chris = phone({ tests: [orig, copyOnChris] });
+  const lea = phone({ tests: [T('Y', 'lea', { sharedFrom: 'X', updated: 20 })] });   // joined by link
+  const m = mergeSync(lea, syncOf(chris));
+  assert.deepEqual(m.putTests.map(t => t.id), ['X']); assert.equal(m.summary.skipped, 1);
+  const lea2 = applyMerge(lea, m);
+  assert.equal(lea2.tests.filter(t => t.profileId === 'lea').length, 1);
+  const chris2 = sync(chris, lea);
+  assert.equal(chris2.tests.filter(t => t.profileId === 'lea').length, 1);
+  // two incoming copies with the same sharedFrom: only the first is added
+  const two = { ...syncOf(phone()), tests: [T('p', 'lea', { sharedFrom: 'S' }), T('q', 'lea', { sharedFrom: 'S' })] };
+  assert.equal(mergeSync(phone(), two).putTests.length, 1);
+});
+
+test('linkedTests finds the linked copy in both directions', () => {
+  const a = T('X', 'chris'), b = makeLinkedTest(a, 'Z', 'lea', 1), c = T('Q', 'lea');
+  assert.deepEqual(linkedTests([a, b, c], a).map(t => t.id), ['Z']);
+  assert.deepEqual(linkedTests([a, b, c], b).map(t => t.id), ['X']);
+  assert.deepEqual(linkedTests([a, b, c], c), []);
+  const joined = T('Y', 'lea', { sharedFrom: 'X' }), other = T('W', 'chris', { sharedFrom: 'X' });
+  assert.deepEqual(linkedTests([joined, other], joined).map(t => t.id), ['W']);
+});
+
+test('sync: meter offset follows the last change', () => {
+  const a = phone({ settings: { offsetMin: -60, offsetUpdated: 100 } });
+  const b = phone({ settings: { offsetMin: -120, offsetUpdated: 200 } });
+  assert.equal(sync(a, b).settings.offsetMin, -120);
+  assert.equal(mergeSync(b, syncOf(a)).settings, null);
+  const old = phone({ settings: { offsetMin: 30 } });   // never saved since the update: offsetUpdated missing = 0
+  assert.equal(sync(old, a).settings.offsetMin, -60);
+  assert.equal(mergeSync(a, syncOf(old)).settings, null);
+});
+
+test('sync: importing the same file twice changes nothing the second time', () => {
+  const a = phone({ tests: [T('a', 'chris', { updated: 1 }), T('dead', 'chris', { updated: 1 })], readings: [R('r1', 1), MR('m-a', 1)] });
+  const b = phone({ tests: [T('b', 'lea', { updated: 2 }), T('a', 'chris', { note: 'newer', updated: 5 })], readings: [R('r2', 2)],
+    deleted: [{ store: 'tests', id: 'dead', at: 9 }], settings: { offsetMin: 5, offsetUpdated: 9 } });
+  const file = syncOf(b);
+  const once = applyMerge(a, mergeSync(a, file));
+  const m2 = mergeSync(once, file);
+  assert.equal(m2.changed, false);
+  assert.deepEqual([m2.putTests, m2.putReadings, m2.deleteTests, m2.deleteReadings, m2.settings], [[], [], [], [], null]);
+  assert.deepEqual(m2.summary, { newTests: 0, updatedTests: 0, newReadings: 0, removed: 0, skipped: 0 });
+  // and both phones end up equal after syncing both ways
+  const b2 = sync(b, once);
+  assert.deepEqual(ids(b2.tests), ids(once.tests)); assert.deepEqual(ids(b2.readings), ids(once.readings));
+});
+
+test('validateSync rejects bad files', () => {
+  const good = syncOf(phone({ tests: [T('a', 'chris')], readings: [R('r', 1), MR('m', 1)], deleted: [{ store: 'tests', id: 'x', at: 1 }] }));
+  assert.equal(validateSync(good).ok, true);
+  assert.equal(validateSync({ ...good, deleted: undefined, settings: undefined }).ok, true);
+  for (const bad of [null, 5, 'x', [], {}, { ...good, app: 'other' }, { ...good, version: 2 },
+    { ...good, tests: 'no' }, { ...good, tests: [{ id: 1 }] }, { ...good, tests: [{ ...T('a', 'chris'), items: [] }] },
+    { ...good, readings: [{ id: 'r' }] }, { ...good, readings: undefined },
+    { ...good, deleted: [{ store: 'meta', id: 'x', at: 1 }] }, { ...good, deleted: {} },
+    { ...good, settings: { offsetMin: 'abc' } }, { ...good, settings: { offsetMin: 0, offsetUpdated: 'x' } }]) {
+    assert.equal(validateSync(bad).ok, false, JSON.stringify(bad));
+  }
+  assert.match(validateSync({ app: 'glucose-track', version: 2 }).error, /backup/);
+});
+
+test('backups accept the optional deleted list and offsetUpdated; old backups still work', () => {
+  const base = { app: 'glucose-track', version: 2, profiles: DEFAULT_PROFILES, settings: { offsetMin: 0 }, tests: [], readings: [] };
+  assert.equal(validateBackup(base).ok, true);
+  assert.equal(validateBackup({ ...base, settings: { offsetMin: -60, offsetUpdated: 5 }, deleted: [{ store: 'tests', id: 'a', at: 1 }] }).ok, true);
+  assert.equal(validateBackup({ ...base, deleted: [{ store: 'tests' }] }).ok, false);
+  assert.equal(validateBackup({ ...base, deleted: 'x' }).ok, false);
+});
