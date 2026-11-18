@@ -483,16 +483,17 @@ function importView() {
       const isZip = /\.zip$/i.test(file.name) || (head[0] === 0x50 && head[1] === 0x4b);
       const text = isZip ? await readReadingsCsvFromZip(buf) : new TextDecoder().decode(buf);
       const { readings, invalid } = parseReadingsCsv(text);
-      const { fresh, duplicates } = dedupeReadings(readings, state.readings.map(r => r.id), state.readings);
-      await db.putMany('readings', fresh);
+      const { fresh, updated, duplicates } = dedupeReadings(readings, state.readings.map(r => r.id), state.readings);
+      await db.putMany('readings', [...fresh, ...updated]);
       await reload();
-      const sum = importSummary(fresh, duplicates, invalid, state.profiles);
+      const sum = importSummary(fresh, duplicates, invalid, state.profiles, updated);
       out.replaceChildren(h('div', { class: 'card' }, h('h3', null, 'Import finished'),
         h('ul', { class: 'plain' },
           h('li', null, `New readings: ${sum.newReadings}`),
+          sum.updatedReadings ? h('li', null, `Updated (tags or values changed): ${sum.updatedReadings}`) : null,
           h('li', null, `Already in the app (skipped): ${sum.duplicates}`),
           sum.invalid ? h('li', null, `Unreadable rows skipped: ${sum.invalid}`) : null,
-          state.profiles.map(p => h('li', null, `${p.name} (tag "${p.tag}"): ${sum.perProfile[p.id]} new, ${state.readings.filter(r => r.source !== 'manual' && r.tags?.includes(p.tag.toLowerCase())).length} in total`)),
+          state.profiles.map(p => h('li', null, `${p.name} (tag "${p.tag}"): ${sum.perProfile[p.id]} new or updated, ${state.readings.filter(r => r.source !== 'manual' && r.tags?.includes(p.tag.toLowerCase())).length} in total`)),
           h('li', null, `Untagged readings (stored, not used): ${sum.untagged}`),
           sum.otherTags ? h('li', null, `Readings with other tags (stored, not used): ${sum.otherTags}`) : null),
         h('a', { class: 'btn', href: '#/tests' }, 'See tests')));
@@ -678,6 +679,7 @@ function syncCard() {
           h('li', null, `New meals: ${sum.newTests}`),
           h('li', null, `Updated meals: ${sum.updatedTests}`),
           h('li', null, `New readings: ${sum.newReadings}`),
+          sum.updatedReadings ? h('li', null, `Updated readings (tags or values changed): ${sum.updatedReadings}`) : null,
           h('li', null, `Removed (deleted on the other phone): ${sum.removed}`),
           h('li', null, `Duplicates skipped: ${sum.skipped}`),
           m.settings ? h('li', null, `Meter clock offset now ${m.settings.offsetMin} min`) : null)));

@@ -491,7 +491,7 @@ test('sync: data unique to each phone is kept on both sides', () => {
   assert.deepEqual(ids(lea2.readings), ['m-c', 'r1', 'r2']);
   assert.deepEqual(ids(chris2.readings), ids(lea2.readings));
   const s = mergeSync(lea, syncOf(chris)).summary;
-  assert.deepEqual(s, { newTests: 1, updatedTests: 0, newReadings: 2, removed: 0, skipped: 0 });
+  assert.deepEqual(s, { newTests: 1, updatedTests: 0, newReadings: 2, updatedReadings: 0, removed: 0, skipped: 0 });
 });
 
 test('sync: newer edit wins, older edit is ignored, both directions', () => {
@@ -664,7 +664,7 @@ test('sync: importing the same file twice changes nothing the second time', () =
   const m2 = mergeSync(once, file);
   assert.equal(m2.changed, false);
   assert.deepEqual([m2.putTests, m2.putReadings, m2.deleteTests, m2.deleteReadings, m2.settings], [[], [], [], [], null]);
-  assert.deepEqual(m2.summary, { newTests: 0, updatedTests: 0, newReadings: 0, removed: 0, skipped: 0 });
+  assert.deepEqual(m2.summary, { newTests: 0, updatedTests: 0, newReadings: 0, updatedReadings: 0, removed: 0, skipped: 0 });
   // and both phones end up equal after syncing both ways
   const b2 = sync(b, once);
   assert.deepEqual(ids(b2.tests), ids(once.tests)); assert.deepEqual(ids(b2.readings), ids(once.readings));
@@ -690,4 +690,49 @@ test('backups accept the optional deleted list and offsetUpdated; old backups st
   assert.equal(validateBackup({ ...base, settings: { offsetMin: -60, offsetUpdated: 5 }, deleted: [{ store: 'tests', id: 'a', at: 1 }] }).ok, true);
   assert.equal(validateBackup({ ...base, deleted: [{ store: 'tests' }] }).ok, false);
   assert.equal(validateBackup({ ...base, deleted: 'x' }).ok, false);
+});
+
+// ---- re-import / sync of a reading whose tags changed on the meter ----
+const csvRow = tags => 'reading_id,reading_timestamp,reading_type,reading_value,reading_unit,tags\n' +
+  `rid-1,2026-01-01 10:00:00,glucose,5.5,mmoll,"${tags}"\n`;
+
+test('re-import with an added tag updates the reading and it then matches the profile', () => {
+  const lea = { id: 'lea', name: 'Lea', tag: 'lea' };
+  const first = dedupeReadings(parseReadingsCsv(csvRow('[]')).readings, []);
+  let store = first.fresh;
+  assert.equal(profileGlucose(store, lea).length, 0);
+  const inc = parseReadingsCsv(csvRow("['lea']")).readings;
+  const d = dedupeReadings(inc, store.map(r => r.id), store, 777);
+  assert.equal(d.fresh.length, 0); assert.equal(d.duplicates, 0);
+  assert.equal(d.updated.length, 1); assert.equal(d.updated[0].updated, 777);
+  store = [...d.updated];
+  assert.equal(profileGlucose(store, lea).length, 1);
+  const t = { id: 't', profileId: 'lea', items: ['Rice'], start: store[0].ts, created: 1 };
+  assert.ok(evaluateTest(t, store, lea).match.baseline);
+  const s = importSummary(d.fresh, d.duplicates, 0, [lea], d.updated);
+  assert.equal(s.updatedReadings, 1); assert.equal(s.perProfile.lea, 1);
+  // identical re-import changes nothing
+  const again = dedupeReadings(inc, store.map(r => r.id), store);
+  assert.deepEqual([again.fresh.length, again.updated.length, again.duplicates], [0, 0, 1]);
+  // same tags in another case/order is not a change
+  const same = dedupeReadings([{ ...inc[0], tags: ['LEA'] }], store.map(r => r.id), store);
+  assert.equal(same.updated.length, 0);
+});
+
+test('sync carries a tag update to the other phone; a second import changes nothing; older never overwrites newer', () => {
+  const a = phone({ readings: [R('r1', 5000, 5, [])] });
+  const b = phone({ readings: [{ ...R('r1', 5000, 5, ['lea']), updated: 900 }] });
+  const m = mergeSync(a, syncOf(b));
+  assert.equal(m.summary.updatedReadings, 1);
+  const a2 = applyMerge(a, m);
+  assert.deepEqual(a2.readings[0].tags, ['lea']);
+  const m2 = mergeSync(a2, syncOf(b));
+  assert.equal(m2.changed, false); assert.equal(m2.putReadings.length, 0);
+  // b imports the old untagged file from a: b keeps its newer version
+  const mb = mergeSync(b, syncOf(a));
+  assert.equal(mb.putReadings.length, 0);
+  assert.deepEqual(applyMerge(b, mb).readings[0].tags, ['lea']);
+  // equal stamps: keep local
+  const c = phone({ readings: [{ ...R('r1', 5000, 5, ['chris']), updated: 900 }] });
+  assert.equal(mergeSync(c, syncOf(b)).putReadings.length, 0);
 });

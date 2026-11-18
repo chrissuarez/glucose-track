@@ -122,19 +122,39 @@ export function parseReadingsCsv(text) {
 
 /**
  * Dedupe incoming readings against known ids (and against each other).
- * Returns { fresh, duplicates }.
+ * The meter export is the source of truth for imported readings: a known id whose tags or values
+ * changed (e.g. a tag added in the Keto-Mojo app later) is an update, stored with a new `updated` stamp.
+ * Returns { fresh, updated, duplicates }.
  */
-export function dedupeReadings(incoming, existingIds, existingReadings = []) {
+export function dedupeReadings(incoming, existingIds, existingReadings = [], now = Date.now()) {
   const seen = new Set(existingIds);
+  const byId = new Map(existingReadings.map(r => [r.id, r]));
   const keys = new Set(existingReadings.map(readingKey).filter(Boolean));
-  const fresh = [];
+  const fresh = [], updated = [];
   let duplicates = 0;
+  const done = new Set();
   for (const r of incoming) {
+    if (done.has(r.id)) { duplicates++; continue; }
+    const cur = byId.get(r.id);
+    if (cur && !isManual(cur) && !isManual(r)) {
+      done.add(r.id);
+      if (sameReading(cur, r)) duplicates++;
+      else { const u = { ...r, updated: now }; updated.push(u); keys.add(readingKey(u)); }
+      continue;
+    }
     const k = readingKey(r);
     if (seen.has(r.id) || (k && keys.has(k))) { duplicates++; continue; }
-    seen.add(r.id); if (k) keys.add(k); fresh.push(r);
+    seen.add(r.id); done.add(r.id); if (k) keys.add(k); fresh.push(r);
   }
-  return { fresh, duplicates };
+  return { fresh, updated, duplicates };
+}
+
+const tagSet = r => [...new Set((r.tags || []).map(t => String(t).toLowerCase()))].sort().join(',');
+
+/** Same meter reading content: ts, type, value, unit and tags (as a lowercase set). */
+export function sameReading(a, b) {
+  return a.ts === b.ts && a.type === b.type && Number(a.value).toFixed(4) === Number(b.value).toFixed(4) &&
+    (a.unit || '') === (b.unit || '') && tagSet(a) === tagSet(b);
 }
 
 /** Content key of an imported meter reading (time, type, value, tags). Null for manual readings. */
@@ -143,17 +163,17 @@ export function readingKey(r) {
   return `${r.ts}|${r.type}|${Number(r.value).toFixed(4)}|${[...(r.tags || [])].sort().join(',')}`;
 }
 
-/** Summary shown after import. */
-export function importSummary(fresh, duplicates, invalid, profiles) {
+/** Summary shown after import. perProfile counts new and updated readings that belong to each person. */
+export function importSummary(fresh, duplicates, invalid, profiles, updated = []) {
   const perProfile = {};
   for (const p of profiles) perProfile[p.id] = 0;
   let untagged = 0, otherTags = 0;
-  for (const r of fresh) {
+  for (const r of [...fresh, ...updated]) {
     if (!r.tags || !r.tags.length) { untagged++; continue; }
     const owner = profiles.find(p => r.tags.includes(p.tag.toLowerCase()));
     if (owner) perProfile[owner.id]++; else otherTags++;
   }
-  return { newReadings: fresh.length, duplicates, invalid, perProfile, untagged, otherTags };
+  return { newReadings: fresh.length, updatedReadings: updated.length, duplicates, invalid, perProfile, untagged, otherTags };
 }
 
 // ---- Matching & scoring -------------------------------------------------
@@ -618,7 +638,7 @@ export function mergeSync(local, incoming) {
   let tombstones = mergeTombstones(local.deleted, incoming.deleted);
   const tomb = new Map(tombstones.map(d => [d.store + ':' + d.id, d.at]));
   const dead = (store, r) => tomb.has(store + ':' + r.id) && tomb.get(store + ':' + r.id) >= recordStamp(r);
-  const summary = { newTests: 0, updatedTests: 0, newReadings: 0, removed: 0, skipped: 0 };
+  const summary = { newTests: 0, updatedTests: 0, newReadings: 0, updatedReadings: 0, removed: 0, skipped: 0 };
 
   // tests: shared copies are compared under their canonical id, so the same meal on two phones is one record.
   // A delete of an old alias id counts as a delete of the canonical id.
@@ -647,12 +667,23 @@ export function mergeSync(local, incoming) {
   }
   const deleteTests = [...new Set([...L.rekeyed, ...L.tests.filter(t => dead('tests', t)).map(t => t.id)])];
 
-  // readings: add only, never overwrite
+  // readings: new ones are added; an imported reading on both sides keeps the larger `updated` (tie: local)
   const putReadings = [];
   const ids = new Set(lReadings.map(r => r.id));
+  const lById = new Map(lReadings.map(r => [r.id, r]));
   const keys = new Set(lReadings.map(readingKey).filter(Boolean));
+  const upd = r => Number(r?.updated) || 0;
   for (const r of incoming.readings || []) {
-    if (ids.has(r.id) || dead('readings', r)) continue;
+    if (dead('readings', r)) continue;
+    if (ids.has(r.id)) {
+      const cur = lById.get(r.id);
+      if (cur && !isManual(cur) && !isManual(r) && upd(r) > upd(cur) && !sameJson(r, cur)) {
+        const i = putReadings.findIndex(x => x.id === r.id);
+        if (i >= 0) putReadings.splice(i, 1);
+        putReadings.push(r); lById.set(r.id, r); keys.add(readingKey(r)); summary.updatedReadings++;
+      }
+      continue;
+    }
     const k = readingKey(r);
     if (k && keys.has(k)) { summary.skipped++; continue; }
     putReadings.push(r); ids.add(r.id); if (k) keys.add(k); summary.newReadings++;
