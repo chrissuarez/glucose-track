@@ -456,7 +456,7 @@ test('backup validation accepts the optional sharedFrom field', () => {
 });
 
 // ---- Sync between phones ----
-import { validateSync, mergeSync, applyMerge, buildSync, mergeTombstones, addTombstone, TOMBSTONE_MAX, linkedTests, makeLinkedTest, readingKey } from '../js/logic.js';
+import { validateSync, mergeSync, applyMerge, buildSync, mergeTombstones, addTombstone, TOMBSTONE_MAX, linkedTests, makeLinkedTest, readingKey, linkedTestId, canonicalizeTests } from '../js/logic.js';
 
 const T = (id, profileId, extra = {}) => ({ id, profileId, items: ['Rice'], mealName: '', start: 1000, note: '', created: 1000, ...extra });
 const R = (id, ts, value = 5, tags = ['chris']) => ({ id, ts, type: 'glucose', value, unit: 'mmoll', tags });
@@ -565,22 +565,80 @@ test('sync: shared meal arriving by link and by sync gives one test per person',
   const orig = T('X', 'chris', { updated: 10 });
   const copyOnChris = makeLinkedTest(orig, 'Z', 'lea', 10);
   assert.equal(copyOnChris.sharedFrom, 'X'); assert.equal(copyOnChris.profileId, 'lea');
+  assert.equal(copyOnChris.id, linkedTestId('X', 'lea'));
   const chris = phone({ tests: [orig, copyOnChris] });
-  const lea = phone({ tests: [T('Y', 'lea', { sharedFrom: 'X', updated: 20 })] });   // joined by link
+  const lea = phone({ tests: [T(linkedTestId('X', 'lea'), 'lea', { sharedFrom: 'X', updated: 20 })] });   // joined by link
   const m = mergeSync(lea, syncOf(chris));
-  assert.deepEqual(m.putTests.map(t => t.id), ['X']); assert.equal(m.summary.skipped, 1);
+  assert.deepEqual(m.putTests.map(t => t.id), ['X']);
   const lea2 = applyMerge(lea, m);
   assert.equal(lea2.tests.filter(t => t.profileId === 'lea').length, 1);
   const chris2 = sync(chris, lea);
   assert.equal(chris2.tests.filter(t => t.profileId === 'lea').length, 1);
-  // two incoming copies with the same sharedFrom: only the first is added
+  // two incoming copies with the same sharedFrom: one test
   const two = { ...syncOf(phone()), tests: [T('p', 'lea', { sharedFrom: 'S' }), T('q', 'lea', { sharedFrom: 'S' })] };
   assert.equal(mergeSync(phone(), two).putTests.length, 1);
 });
 
+test('sync: an edit to a shared copy on the recipient phone reaches the sender', () => {
+  const orig = T('X', 'chris', { updated: 10 });
+  const C = linkedTestId('X', 'lea');
+  const chris = phone({ tests: [orig, makeLinkedTest(orig, null, 'lea', 10)] });
+  const lea = phone({ tests: [T(C, 'lea', { sharedFrom: 'X', updated: 30, note: 'fixed start', start: 999 })] });
+  const chris2 = sync(chris, lea);
+  const c = chris2.tests.find(t => t.id === C);
+  assert.equal(c.note, 'fixed start'); assert.equal(c.start, 999);
+  assert.equal(chris2.tests.length, 2);
+});
+
+test('sync: deleting a shared copy on either phone removes it on both and it stays gone', () => {
+  const orig = T('X', 'chris', { updated: 10 });
+  const C = linkedTestId('X', 'lea');
+  for (const side of ['chris', 'lea']) {
+    let chris = phone({ tests: [orig, makeLinkedTest(orig, null, 'lea', 10)] });
+    let lea = phone({ tests: [T('Y', 'lea', { sharedFrom: 'X', updated: 10 })] });   // legacy random id
+    lea = applyMerge(lea, mergeSync(lea, syncOf(chris)));
+    chris = applyMerge(chris, mergeSync(chris, syncOf(lea)));
+    const del = p => ({ ...p, tests: p.tests.filter(t => t.profileId !== 'lea'),
+      deleted: addTombstone(p.deleted, 'tests', C, 50) });
+    if (side === 'chris') chris = del(chris); else lea = del(lea);
+    for (let i = 0; i < 3; i++) {
+      lea = applyMerge(lea, mergeSync(lea, syncOf(chris)));
+      chris = applyMerge(chris, mergeSync(chris, syncOf(lea)));
+    }
+    assert.deepEqual(ids(chris.tests), ['X'], side); assert.deepEqual(ids(lea.tests), ['X'], side);
+  }
+  // a delete made under an old alias id removes the copy held under another alias too
+  const chris = phone({ tests: [orig, T('Y', 'lea', { sharedFrom: 'X', updated: 10 })] });
+  const lea = phone({ deleted: [{ store: 'tests', id: 'Y', at: 50 }] });
+  const chris2 = sync(chris, lea);
+  assert.deepEqual(ids(chris2.tests), ['X']);
+  assert.ok(chris2.deleted.some(d => d.id === C));
+  assert.deepEqual(ids(sync(lea, chris2).tests), ['X']);
+});
+
+test('sync: a legacy random-id copy is re-keyed to the shared id, newest edit kept', () => {
+  const C = linkedTestId('X', 'lea');
+  const chris = phone({ tests: [T('X', 'chris', { updated: 10 }), T('Z', 'lea', { sharedFrom: 'X', updated: 10, note: 'old' })] });
+  const lea = phone({ tests: [T('Y', 'lea', { sharedFrom: 'X', updated: 40, note: 'new' })] });
+  const m = mergeSync(chris, syncOf(lea));
+  assert.ok(m.deleteTests.includes('Z'));
+  const chris2 = applyMerge(chris, m);
+  assert.deepEqual(ids(chris2.tests), [C, 'X'].sort());
+  assert.equal(chris2.tests.find(t => t.id === C).note, 'new');
+  // the other direction agrees, and a second import is a no-op
+  const lea2 = applyMerge(lea, mergeSync(lea, syncOf(chris2)));
+  assert.deepEqual(ids(lea2.tests), ids(chris2.tests));
+  const again = mergeSync(chris2, syncOf(lea));
+  assert.equal(again.changed, false);
+  assert.equal(mergeSync(lea2, syncOf(chris2)).changed, false);
+  // load-time helper keeps the newest alias
+  const c = canonicalizeTests([T('a', 'lea', { sharedFrom: 'X', updated: 1 }), T('b', 'lea', { sharedFrom: 'X', updated: 2 })]);
+  assert.deepEqual(c.tests.map(t => [t.id, t.updated]), [[C, 2]]); assert.deepEqual(c.rekeyed, ['a', 'b']);
+});
+
 test('linkedTests finds the linked copy in both directions', () => {
   const a = T('X', 'chris'), b = makeLinkedTest(a, 'Z', 'lea', 1), c = T('Q', 'lea');
-  assert.deepEqual(linkedTests([a, b, c], a).map(t => t.id), ['Z']);
+  assert.deepEqual(linkedTests([a, b, c], a).map(t => t.id), [linkedTestId('X', 'lea')]);
   assert.deepEqual(linkedTests([a, b, c], b).map(t => t.id), ['X']);
   assert.deepEqual(linkedTests([a, b, c], c), []);
   const joined = T('Y', 'lea', { sharedFrom: 'X' }), other = T('W', 'chris', { sharedFrom: 'X' });

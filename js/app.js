@@ -1,7 +1,7 @@
 import {
   MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, rankIngredients, prickSchedule,
   formatCountdown, foodNames, parseGlucoseInput, makeManualReading, isManual, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
-  encodeSharedMeal, decodeSharedMeal, validateSync, mergeSync, linkedTests, makeLinkedTest,
+  encodeSharedMeal, decodeSharedMeal, validateSync, mergeSync, linkedTests, makeLinkedTest, linkedTestId,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -335,13 +335,13 @@ function joinView(data) {
   const err = h('div', { role: 'alert' });
   const add = async () => {
     try {
-      const dup = state.tests.find(t => t.sharedFrom === m.sid && t.profileId === target.id);
+      const dup = state.tests.find(t => t.id === linkedTestId(m.sid, target.id) || (t.sharedFrom === m.sid && t.profileId === target.id));
       if (dup) {
         await db.setMeta('selectedProfile', target.id); await reload(); renderSwitcher();
         toast('This meal is already added.'); location.hash = `#/test/${dup.id}`; return;
       }
       const known = new Map(foodNames(state.tests.filter(t => t.profileId === target.id)).map(n => [normFood(n), n]));
-      const rec = { id: uid(), profileId: target.id, created: Date.now(), updated: Date.now(),
+      const rec = { id: linkedTestId(m.sid, target.id), profileId: target.id, created: Date.now(), updated: Date.now(),
         items: normItems(m.items.map(n => known.get(normFood(n)) || n)), mealName: m.mealName, start: m.start, note: m.note, sharedFrom: m.sid };
       await db.put('tests', rec);
       await db.setMeta('selectedProfile', target.id);
@@ -432,7 +432,7 @@ function testFormView(id) {
     delete rec.food;
     Object.assign(rec, { items: finalItems, mealName: mealName.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim(), updated: now });
     // "<other> ate this too": also add their copy on this phone (a sync carries it to their phone)
-    const copy = !existing && other && alsoAte.checked ? makeLinkedTest(rec, uid(), other.id, now) : null;
+    const copy = !existing && other && alsoAte.checked ? makeLinkedTest(rec, null, other.id, now) : null;
     try {
       await db.putMany('tests', copy ? [rec, copy] : [rec]);
       if (bp.ok) await db.put('readings', makeManualReading(uid(), profile().id, bp.value, Math.min(Date.now(), st)));

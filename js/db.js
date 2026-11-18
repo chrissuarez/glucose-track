@@ -1,5 +1,5 @@
 // IndexedDB wrapper. Every failure becomes a StorageError with a readable message.
-import { DEFAULT_PROFILES, BACKUP_VERSION, migrateTest, needsMigration, migrateBackup, buildSync, addTombstone } from './logic.js';
+import { DEFAULT_PROFILES, BACKUP_VERSION, migrateTest, needsMigration, canonicalizeTests, migrateBackup, buildSync, addTombstone } from './logic.js';
 
 const DB_NAME = 'glucose-track';
 const DB_VERSION = 1;
@@ -81,6 +81,18 @@ export async function loadAll() {
     await putMany('tests', migrated);        // persist the migration
     const byId = new Map(migrated.map(t => [t.id, t]));
     tests = tests.map(t => byId.get(t.id) || t);
+  }
+  // shared copies saved under an old random id: move them to their canonical id (newest alias kept)
+  const canon = canonicalizeTests(tests);
+  if (canon.rekeyed.length) {
+    const keep = new Set(canon.tests.map(t => t.id));
+    const gone = canon.rekeyed.filter(id => !keep.has(id));
+    await tx(['tests'], 'readwrite', t => {
+      const s = t.objectStore('tests');
+      gone.forEach(id => s.delete(id));
+      canon.tests.forEach(x => s.put(x));
+    });
+    tests = canon.tests;
   }
   return {
     profiles: profiles || DEFAULT_PROFILES.map(p => ({ ...p })),
