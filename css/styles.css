@@ -174,3 +174,5 @@ figure.chart figcaption { color: var(--muted); font-size: .85rem; text-align: ce
 .tip strong { font-size: .95rem; }
 .tip .sub { font-size: .82rem; }
 .card.hl { background: var(--accent-soft); border-color: var(--accent); }
+label.check { display: flex; align-items: center; gap: 8px; }
+label.check input { width: auto; margin: 0; }

@@ -1,6 +1,7 @@
 import {
   MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, rankIngredients, prickSchedule,
   formatCountdown, foodNames, parseGlucoseInput, makeManualReading, isManual, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
+  encodeSharedMeal, decodeSharedMeal,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -26,6 +27,7 @@ const s = (tag, props, ...kids) => build(document.createElementNS(SVGNS, tag), p
 
 // ---------- state ----------
 let state = null;       // loaded data
+let shareHighlight = null;  // test id whose share card should stand out once
 let cleanup = [];       // timers to clear on route change
 const view = document.getElementById('view');
 
@@ -253,6 +255,7 @@ function testView(id) {
       h('p', { class: 'help' }, 'Keep this app open for alerts. Phones may pause it when the screen is off, so also set a phone timer.')));
   }
 
+  if (profile().id === t.profileId) nodes.push(shareCard(t));
   if (profile().id === t.profileId) nodes.push(addReadingCard());
 
   // result
@@ -290,6 +293,70 @@ function testView(id) {
     } }, 'Delete')));
   return nodes;
 }
+const otherProfile = () => state.profiles.find(p => p.id !== profile().id) || null;
+
+function shareCard(t) {
+  const other = otherProfile();
+  if (!other) return null;
+  const hl = shareHighlight === t.id;
+  if (hl) shareHighlight = null;
+  const out = h('div', { role: 'status' });
+  const send = async () => {
+    const url = location.origin + location.pathname + '#/join/' + encodeSharedMeal(t, other.id);
+    const text = `${profile().name} ate ${testLabel(t)}. Open this link to add the meal for ${other.name}.`;
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Shared meal: ' + testLabel(t), text, url }); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(url); out.replaceChildren(h('p', { class: 'help' }, 'Link copied. Send it to ' + other.name + '.')); return; }
+      catch {}
+    }
+    const box = h('input', { type: 'text', readonly: true, value: url, 'aria-label': 'Shared meal link', onfocus: e => e.target.select() });
+    out.replaceChildren(h('p', { class: 'help' }, 'Copy this link and send it to ' + other.name + '.'), box);
+    box.focus();
+  };
+  return h('div', { class: 'card' + (hl ? ' hl' : '') },
+    h('h3', null, 'Shared meal'),
+    h('button', { class: 'btn', type: 'button', onclick: send }, `Send to ${other.name}`),
+    out,
+    h('p', { class: 'help' }, `${other.name} opens the link on their phone. The meal is added for them. They only add their readings.`));
+}
+
+function joinView(data) {
+  const r = decodeSharedMeal(data);
+  if (!r.ok) return [h('h2', null, 'Shared meal'), h('div', { class: 'card err', role: 'alert' }, h('strong', null, 'Cannot open this link. '), r.error),
+    h('a', { class: 'btn secondary', href: '#/' }, 'Home')];
+  const m = r.meal;
+  const target = state.profiles.find(p => p.id === m.p) || profile();
+  const label = testLabel(m);
+  const err = h('div', { role: 'alert' });
+  const add = async () => {
+    try {
+      const dup = state.tests.find(t => t.sharedFrom === m.sid && t.profileId === target.id);
+      if (dup) {
+        await db.setMeta('selectedProfile', target.id); await reload(); renderSwitcher();
+        toast('This meal is already added.'); location.hash = `#/test/${dup.id}`; return;
+      }
+      const known = new Map(foodNames(state.tests.filter(t => t.profileId === target.id)).map(n => [normFood(n), n]));
+      const rec = { id: uid(), profileId: target.id, created: Date.now(),
+        items: normItems(m.items.map(n => known.get(normFood(n)) || n)), mealName: m.mealName, start: m.start, note: m.note, sharedFrom: m.sid };
+      await db.put('tests', rec);
+      await db.setMeta('selectedProfile', target.id);
+      await reload(); renderSwitcher();
+      location.hash = `#/test/${rec.id}`;
+    } catch (e) { err.replaceChildren(errorCard(e)); }
+  };
+  return [h('h2', null, 'Shared meal'),
+    h('div', { class: 'card' }, h('strong', null, label),
+      m.mealName ? h('p', { class: 'help' }, 'Foods: ' + m.items.join(', ')) : null,
+      h('p', { class: 'help' }, 'Started: ' + fmtDT(m.start) + (m.note ? ' - ' + m.note : '')),
+      h('p', null, `This meal will be added for ${target.name}.`)),
+    err,
+    h('button', { class: 'btn', type: 'button', onclick: add }, `Add this meal for ${target.name}`),
+    h('a', { class: 'btn secondary', href: '#/' }, 'Cancel')];
+}
+
 function addReadingCard() {
   const val = h('input', { id: 'rval', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: 'e.g. 5.4' });
   const when = h('input', { id: 'rtime', type: 'datetime-local', value: toLocalInput(Date.now()) });
@@ -334,6 +401,8 @@ function testFormView(id) {
   const start = h('input', { id: 'start', type: 'datetime-local', required: true, value: toLocalInput(existing?.start ?? Date.now()) });
   const base = h('input', { id: 'base', type: 'text', inputmode: 'decimal', step: '0.1', autocomplete: 'off', placeholder: 'e.g. 5.1' });
   const note = h('textarea', { id: 'note', rows: 2 }, existing?.note || '');
+  const other = existing ? null : otherProfile();
+  const alsoAte = h('input', { id: 'alsoate', type: 'checkbox' });
   const err = h('div', { role: 'alert' });
   const drawChips = () => chips.replaceChildren(...items.map(it => h('li', null, h('span', null, it),
     h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${it}`, onclick: () => { items = items.filter(x => x !== it); drawChips(); } }, '×'))));
@@ -362,7 +431,9 @@ function testFormView(id) {
     try {
       await db.put('tests', rec);
       if (bp.ok) await db.put('readings', makeManualReading(uid(), profile().id, bp.value, Math.min(Date.now(), st)));
-      await reload(); location.hash = `#/test/${rec.id}`; }
+      await reload();
+      if (!existing && alsoAte.checked) shareHighlight = rec.id;
+      location.hash = `#/test/${rec.id}`; }
     catch (ex) { err.replaceChildren(errorCard(ex)); }
   } },
     h('label', { for: 'mealname' }, 'Meal name (optional)'), mealName,
@@ -375,7 +446,8 @@ function testFormView(id) {
     h('p', { class: 'help' }, 'Prick your finger just before eating for the baseline.'),
     existing ? null : [h('label', { for: 'base' }, 'Baseline reading (mmol/L, optional)'), base,
       h('p', { class: 'help' }, 'Type it now if you have no Keto-Mojo app. You can also add readings later on the test screen.')],
-    h('label', { for: 'note' }, 'Note (optional)'), note, err,
+    h('label', { for: 'note' }, 'Note (optional)'), note,
+    other ? h('label', { class: 'check', for: 'alsoate' }, alsoAte, ` ${other.name} ate this too`) : null, err,
     h('button', { class: 'btn', type: 'submit' }, existing ? 'Save changes' : 'Start test'),
     h('a', { class: 'btn secondary', href: existing ? `#/test/${existing.id}` : '#/' }, 'Cancel'));
   return [h('h2', null, existing ? 'Edit test' : `New test for ${profile().name}`), form];
@@ -421,6 +493,7 @@ function foodHelp() {
     ['Prick 4 times', 'Before eating (baseline), then 30, 60 and 120 minutes after the first bite.'],
     ['Tag your readings', 'Type your name (Chris or Lea) as the tag on the meter so it goes to the right person.'],
     ['No Keto-Mojo app?', 'Type each reading into the test screen right after you prick.'],
+    ['Ate the same meal?', 'Enter it once. Tick "ate this too" or tap "Send to" on the test screen, and send the link. The other person opens it, adds the meal, then adds their own readings.'],
     ['Import the export', 'After the test, import the meter export. The app matches readings to tests by time.'],
     ['Repeat 2-3 times', 'One test is only a hint; averages are more reliable.'],
     ['Add to home screen', 'On iPhone, Safari may delete data from sites not opened for 7 days unless the app is on the home screen. Make backups regularly anyway.'],
@@ -602,6 +675,7 @@ function route() {
     case 'food': return ['foods', foodView(decodeURIComponent(b || ''))];
     case 'ingredient': return ['foods', ingredientView(decodeURIComponent(b || ''))];
     case 'test': return ['tests', testView(b)];
+    case 'join': return ['home', joinView(b || '')];
     case 'new': return ['home', testFormView()];
     case 'edit': return ['tests', testFormView(b)];
     case 'import': return ['home', importView()];

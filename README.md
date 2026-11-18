@@ -6,6 +6,8 @@ Not medical advice.
 
 **Manual readings.** No Keto-Mojo app? Type readings in: an optional baseline on the New test form, and an "Add a reading" card on the test screen (also for late entry). They are stored per profile (`source: 'manual'`, id prefix `m-`), are never shifted by the meter clock offset, are included in backups, and can be deleted (imported readings cannot). If an imported reading of the same profile lies within 3 minutes of a typed one, only the imported one is used. Valid range 1.0-33.3 mmol/L; comma or dot accepted.
 
+**Shared meals.** If you both eat the same meal, one of you enters it once. On the test screen tap "Send to <other name>" (or tick "<name> ate this too" on the New test form). The link opens `#/join/...` on the other phone and adds the meal for that person. They only add their own readings. The link carries the meal in the URL itself (foods, name, start time, note), so no server is involved. Opening the same link twice does not add the meal twice (tests keep a `sharedFrom` id).
+
 ## Run locally
 
 ```

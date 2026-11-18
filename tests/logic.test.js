@@ -6,7 +6,7 @@ import {
   MIN, CONSTANTS, DEFAULT_PROFILES, parseCsv, parseTags, toMmol, parseReadingsCsv, dedupeReadings,
   importSummary, profileGlucose, matchTest, scoreTest, ratingFor, evaluateTest, rankFoods,
   prickSchedule, nextPrick, formatCountdown, foodNames, validateBackup, normFood,
-  parseGlucoseInput, makeManualReading, normItems, migrateTest, migrateBackup, testLabel, mealKey, rankIngredients, BACKUP_VERSION,
+  parseGlucoseInput, makeManualReading, normItems, migrateTest, migrateBackup, testLabel, mealKey, rankIngredients, BACKUP_VERSION, encodeSharedMeal, decodeSharedMeal,
 } from '../js/logic.js';
 import { readReadingsCsvFromZip } from '../js/zip.js';
 
@@ -402,4 +402,55 @@ test('backup validation accepts manual readings; import dedupe leaves them alone
   assert.equal(validateBackup({ ...ok, readings: [{ ...man, time: undefined }] }).ok, false);
   const { fresh, duplicates } = dedupeReadings([G('a', 0, 5)], [man.id]);
   assert.equal(fresh.length, 1); assert.equal(duplicates, 0);
+});
+
+// ---- Shared meals ----
+const b64u = o => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o), 'utf8').toString('base64url');
+const goodShare = { v: 1, sid: 's1', p: 'lea', items: ['Rice'], mealName: '', start: 1000, note: '' };
+
+test('shared meal round trip', () => {
+  const t = { id: 'abc', profileId: 'chris', items: ['Rice', 'Egg'], mealName: 'Lunch', start: 1700000000000, note: 'big bowl' };
+  const enc = encodeSharedMeal(t, 'lea');
+  assert.match(enc, /^[A-Za-z0-9_-]+$/);
+  const r = decodeSharedMeal(enc);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.meal, { sid: 'abc', p: 'lea', items: ['Rice', 'Egg'], mealName: 'Lunch', start: 1700000000000, note: 'big bowl' });
+});
+
+test('shared meal keeps unicode and handles missing optional fields', () => {
+  const t = { id: 'u', items: ['Crème brûlée', 'Ei 🥚', '日本'], mealName: 'Déjà vu 🍮', start: 5, note: 'ñ' };
+  const r = decodeSharedMeal(encodeSharedMeal(t, 'lea'));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.meal.items, ['Crème brûlée', 'Ei 🥚', '日本']);
+  assert.equal(r.meal.mealName, 'Déjà vu 🍮');
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, mealName: undefined, note: undefined })).ok, true);
+});
+
+test('shared meal rejects bad input', () => {
+  for (const bad of ['', null, undefined, 42, 'not base64!!', '%%%', 'AAAA', b64u('not json'), b64u('[]'), b64u('null')]) {
+    assert.equal(decodeSharedMeal(bad).ok, false, String(bad));
+  }
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, items: undefined })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, items: [] })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, items: [1] })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, items: ['x'.repeat(61)] })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, items: Array.from({ length: 31 }, (_, i) => 'f' + i) })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, mealName: 'x'.repeat(61) })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, note: 'x'.repeat(501) })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, start: 'now' })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, start: null })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, p: 5 })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, sid: undefined })).ok, false);
+  assert.equal(decodeSharedMeal(b64u({ ...goodShare, v: 2 })).ok, false);
+  assert.equal(decodeSharedMeal('A'.repeat(30000)).ok, false);
+  // truncated link
+  const enc = encodeSharedMeal({ id: 'a', items: ['Rice'], start: 1 }, 'lea');
+  assert.equal(decodeSharedMeal(enc.slice(0, enc.length - 8)).ok, false);
+});
+
+test('backup validation accepts the optional sharedFrom field', () => {
+  const ok = { app: 'glucose-track', version: 2, profiles: DEFAULT_PROFILES, settings: { offsetMin: 0 },
+    tests: [{ id: 't', profileId: 'lea', items: ['x'], start: 1, sharedFrom: 'abc' }], readings: [] };
+  assert.equal(validateBackup(ok).ok, true);
+  assert.equal(migrateBackup(ok).tests[0].sharedFrom, 'abc');
 });

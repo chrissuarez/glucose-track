@@ -389,6 +389,66 @@ export function foodNames(tests) {
   return [...map.values()].sort((a, b) => a.localeCompare(b));
 }
 
+// ---- Shared meals (link) --------------------------------------------------
+
+export const SHARE_LIMITS = { items: 30, item: 60, mealName: 60, note: 500 };
+
+function b64urlEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(str) {
+  if (!/^[A-Za-z0-9_-]+$/.test(str)) throw new Error('bad characters');
+  let b = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  const bin = atob(b);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+/** Build the URL-safe string that carries a meal to another person. */
+export function encodeSharedMeal(test, targetProfileId) {
+  const L = SHARE_LIMITS;
+  const t = migrateTest(test) || {};
+  const payload = {
+    v: 1,
+    sid: String(t.id ?? ''),
+    p: String(targetProfileId ?? ''),
+    items: normItems(t.items).slice(0, L.items).map(i => i.slice(0, L.item)),
+    mealName: String(t.mealName ?? '').trim().replace(/\s+/g, ' ').slice(0, L.mealName),
+    start: t.start,
+    note: String(t.note ?? '').trim().slice(0, L.note),
+  };
+  return b64urlEncode(JSON.stringify(payload));
+}
+
+/** Read a shared-meal string. Returns { ok:true, meal } or { ok:false, error }. */
+export function decodeSharedMeal(str) {
+  const bad = error => ({ ok: false, error });
+  const generic = 'This link is not a valid shared meal.';
+  if (typeof str !== 'string' || !str.trim()) return bad(generic);
+  const L = SHARE_LIMITS;
+  if (str.length > 20000) return bad('This shared meal is too large.');
+  let o;
+  try { o = JSON.parse(b64urlDecode(str.trim())); } catch { return bad(generic + ' It may have been cut short when it was copied.'); }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return bad(generic);
+  if (o.v !== 1) return bad('This link was made by a different version of the app.');
+  if (typeof o.sid !== 'string' || !o.sid || o.sid.length > 100) return bad(generic);
+  if (typeof o.p !== 'string' || !o.p || o.p.length > 100) return bad(generic);
+  if (!Array.isArray(o.items) || !o.items.length || o.items.length > L.items ||
+      !o.items.every(i => typeof i === 'string' && i.trim() && i.length <= L.item)) return bad('The foods in this link are not valid.');
+  if (typeof o.start !== 'number' || !Number.isFinite(o.start)) return bad('The start time in this link is not valid.');
+  const mealName = o.mealName ?? '', note = o.note ?? '';
+  if (typeof mealName !== 'string' || mealName.length > L.mealName) return bad('The meal name in this link is not valid.');
+  if (typeof note !== 'string' || note.length > L.note) return bad('The note in this link is not valid.');
+  const items = normItems(o.items);
+  if (!items.length) return bad('The foods in this link are not valid.');
+  return { ok: true, meal: { sid: o.sid, p: o.p, items, mealName: mealName.trim().replace(/\s+/g, ' '), start: o.start, note: note.trim() } };
+}
+
 // ---- Backup -------------------------------------------------------------
 
 export const BACKUP_VERSION = 2;   // v2: tests have items[] + mealName; v1 tests have food
