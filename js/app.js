@@ -478,9 +478,9 @@ function importView() {
       out.replaceChildren(h('div', { class: 'card' }, h('h3', null, 'Import finished'),
         h('ul', { class: 'plain' },
           h('li', null, `New readings: ${sum.newReadings}`),
-          h('li', null, `Duplicates skipped: ${sum.duplicates}`),
+          h('li', null, `Already in the app (skipped): ${sum.duplicates}`),
           sum.invalid ? h('li', null, `Unreadable rows skipped: ${sum.invalid}`) : null,
-          state.profiles.map(p => h('li', null, `${p.name} (tag "${p.tag}"): ${sum.perProfile[p.id]}`)),
+          state.profiles.map(p => h('li', null, `${p.name} (tag "${p.tag}"): ${sum.perProfile[p.id]} new, ${state.readings.filter(r => r.source !== 'manual' && r.tags?.includes(p.tag.toLowerCase())).length} in total`)),
           h('li', null, `Untagged readings (stored, not used): ${sum.untagged}`),
           sum.otherTags ? h('li', null, `Readings with other tags (stored, not used): ${sum.otherTags}`) : null),
         h('a', { class: 'btn', href: '#/tests' }, 'See tests')));
