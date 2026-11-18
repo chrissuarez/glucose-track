@@ -1,5 +1,5 @@
 // Cache the app shell so the app works offline. Bump CACHE when shell files change.
-const CACHE = 'glucose-track-shell-v10';
+const CACHE = 'glucose-track-shell-v11';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/logic.js', 'js/db.js', 'js/zip.js',

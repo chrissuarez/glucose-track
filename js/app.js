@@ -259,6 +259,18 @@ function testView(id) {
     const names = [...new Set(linked.map(x => state.profiles.find(p => p.id === x.profileId)?.name).filter(Boolean))];
     if (names.length) nodes.splice(3, 0, h('p', { class: 'help' }, `Shared with ${names.join(', ')}`));
   }
+  const other = otherProfile();
+  if (other && profile().id === t.profileId && !t.sharedFrom && !linked.some(x => x.profileId === other.id)) {
+    const ateBtn = h('button', { class: 'btn secondary', onclick: async () => {
+      ateBtn.disabled = true;
+      try {
+        await db.put('tests', makeLinkedTest(t, null, other.id, Date.now()));
+        await reload(); render();
+        toast(`Added for ${other.name}. Switch to ${other.name} at the top to see it.`);
+      } catch (e) { ateBtn.disabled = false; toast(e.message); }
+    } }, `${other.name} ate this too`);
+    nodes.push(ateBtn);
+  }
   if (profile().id === t.profileId) nodes.push(shareCard(t));
   if (profile().id === t.profileId) nodes.push(addReadingCard());
 
