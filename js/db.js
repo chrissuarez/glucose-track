@@ -1,5 +1,5 @@
 // IndexedDB wrapper. Every failure becomes a StorageError with a readable message.
-import { DEFAULT_PROFILES, BACKUP_VERSION, migrateTest, needsMigration, migrateBackup } from './logic.js';
+import { DEFAULT_PROFILES, BACKUP_VERSION, migrateTest, needsMigration, migrateBackup, buildSync, addTombstone } from './logic.js';
 
 const DB_NAME = 'glucose-track';
 const DB_VERSION = 1;
@@ -71,9 +71,9 @@ export async function getMeta(key, fallback = null) {
 export const setMeta = (key, value) => put('meta', { key, value });
 
 export async function loadAll() {
-  let [profiles, settings, selected, lastBackup, tests, readings] = await Promise.all([
+  let [profiles, settings, selected, lastBackup, deleted, tests, readings] = await Promise.all([
     getMeta('profiles', null), getMeta('settings', null), getMeta('selectedProfile', null),
-    getMeta('lastBackup', null), getAll('tests'), getAll('readings'),
+    getMeta('lastBackup', null), getMeta('deleted', []), getAll('tests'), getAll('readings'),
   ]);
   const stale = tests.filter(needsMigration);
   if (stale.length) {
@@ -86,7 +86,7 @@ export async function loadAll() {
     profiles: profiles || DEFAULT_PROFILES.map(p => ({ ...p })),
     settings: settings || { offsetMin: 0 },
     selectedProfile: selected,
-    lastBackup, tests, readings,
+    lastBackup, deleted: Array.isArray(deleted) ? deleted : [], tests, readings,
   };
 }
 
@@ -95,8 +95,35 @@ export async function exportBackup() {
   return {
     app: 'glucose-track', version: BACKUP_VERSION, exportedAt: new Date().toISOString(),
     profiles: d.profiles, settings: d.settings, selectedProfile: d.selectedProfile,
-    tests: d.tests, readings: d.readings,
+    tests: d.tests, readings: d.readings, deleted: d.deleted,
   };
+}
+
+export async function exportSync() {
+  return buildSync(await loadAll());
+}
+
+/** Delete a record and remember it (tombstone) so a sync removes it on the other phone too. One transaction. */
+export async function delWithTombstone(store, id) {
+  const deleted = await getMeta('deleted', []);
+  const next = addTombstone(Array.isArray(deleted) ? deleted : [], store, id, Date.now());
+  return tx([store, 'meta'], 'readwrite', t => {
+    t.objectStore(store).delete(id);
+    t.objectStore('meta').put({ key: 'deleted', value: next });
+  });
+}
+
+/** Write a mergeSync() result in one transaction. Never touches profiles, selectedProfile or lastBackup. */
+export function applySync(m) {
+  return tx(STORES, 'readwrite', t => {
+    const ts = t.objectStore('tests'), rs = t.objectStore('readings'), meta = t.objectStore('meta');
+    m.deleteTests.forEach(id => ts.delete(id));
+    m.deleteReadings.forEach(id => rs.delete(id));
+    m.putTests.forEach(x => ts.put(x));
+    m.putReadings.forEach(x => rs.put(x));
+    meta.put({ key: 'deleted', value: m.tombstones });
+    if (m.settings) meta.put({ key: 'settings', value: m.settings });
+  });
 }
 
 /** Replace everything with backup content in one transaction. */
@@ -110,6 +137,7 @@ export function restoreBackup(b) {
     const meta = t.objectStore('meta');
     meta.put({ key: 'profiles', value: b.profiles });
     meta.put({ key: 'settings', value: b.settings });
+    meta.put({ key: 'deleted', value: Array.isArray(b.deleted) ? b.deleted : [] });
     if (b.selectedProfile) meta.put({ key: 'selectedProfile', value: b.selectedProfile });
   });
 }

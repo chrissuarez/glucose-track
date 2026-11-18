@@ -112,7 +112,9 @@ export function parseReadingsCsv(text) {
     let unit = iUnit >= 0 ? (r[iUnit] || '').trim() : '';
     let value = raw;
     if (type === 'glucose') { value = toMmol(raw, unit); unit = 'mmoll'; }
-    const id = (iId >= 0 && (r[iId] || '').trim()) || `gen-${ts}-${type}-${raw}`;
+    // Deterministic id: the meter's reading_id, else built from the raw row text (not the parsed
+    // time, which depends on the phone's time zone), so the same row gets the same id on any phone.
+    const id = (iId >= 0 && (r[iId] || '').trim()) || `gen-${(r[iTs] || '').trim()}-${type}-${(r[iVal] || '').trim()}`;
     readings.push({ id, ts, type, value, unit, tags: iTags >= 0 ? parseTags(r[iTags]) : [] });
   }
   return { readings, invalid };
@@ -122,15 +124,23 @@ export function parseReadingsCsv(text) {
  * Dedupe incoming readings against known ids (and against each other).
  * Returns { fresh, duplicates }.
  */
-export function dedupeReadings(incoming, existingIds) {
+export function dedupeReadings(incoming, existingIds, existingReadings = []) {
   const seen = new Set(existingIds);
+  const keys = new Set(existingReadings.map(readingKey).filter(Boolean));
   const fresh = [];
   let duplicates = 0;
   for (const r of incoming) {
-    if (seen.has(r.id)) { duplicates++; continue; }
-    seen.add(r.id); fresh.push(r);
+    const k = readingKey(r);
+    if (seen.has(r.id) || (k && keys.has(k))) { duplicates++; continue; }
+    seen.add(r.id); if (k) keys.add(k); fresh.push(r);
   }
   return { fresh, duplicates };
+}
+
+/** Content key of an imported meter reading (time, type, value, tags). Null for manual readings. */
+export function readingKey(r) {
+  if (!r || r.source === 'manual' || !Number.isFinite(r.ts)) return null;
+  return `${r.ts}|${r.type}|${Number(r.value).toFixed(4)}|${[...(r.tags || [])].sort().join(',')}`;
 }
 
 /** Summary shown after import. */
@@ -466,22 +476,33 @@ export function validateBackup(obj) {
   if (!obj.settings || typeof obj.settings !== 'object' || !Number.isFinite(Number(obj.settings.offsetMin))) {
     return bad('Backup has invalid settings.');
   }
-  const foodOk = obj.version === 1
-    ? t => typeof t.food === 'string'
-    : t => Array.isArray(t.items) && t.items.length > 0 && t.items.every(i => typeof i === 'string');
-  if (!Array.isArray(obj.tests) || !obj.tests.every(t => t && typeof t.id === 'string' &&
-      typeof t.profileId === 'string' && foodOk(t) && Number.isFinite(t.start))) {
+  if (!Array.isArray(obj.tests) || !obj.tests.every(t => testOk(t, obj.version === 1))) {
     return bad('Backup has invalid tests.');
   }
-  const readingOk = r => r && typeof r.id === 'string' && typeof r.type === 'string' && Number.isFinite(r.value) &&
-    (r.source === 'manual'
-      ? typeof r.profileId === 'string' && Number.isFinite(r.time)
-      : Number.isFinite(r.ts) && Array.isArray(r.tags));
   if (!Array.isArray(obj.readings) || !obj.readings.every(readingOk)) {
     return bad('Backup has invalid readings.');
   }
+  if (obj.deleted != null && (!Array.isArray(obj.deleted) || !obj.deleted.every(tombstoneOk))) {
+    return bad('Backup has an invalid list of deleted items.');
+  }
   return { ok: true };
 }
+
+function testOk(t, oldFood = false) {
+  const foodOk = oldFood
+    ? typeof t?.food === 'string'
+    : Array.isArray(t?.items) && t.items.length > 0 && t.items.every(i => typeof i === 'string');
+  return !!t && typeof t.id === 'string' && typeof t.profileId === 'string' && foodOk && Number.isFinite(t.start);
+}
+
+function readingOk(r) {
+  return !!r && typeof r.id === 'string' && typeof r.type === 'string' && Number.isFinite(r.value) &&
+    (r.source === 'manual'
+      ? typeof r.profileId === 'string' && Number.isFinite(r.time)
+      : Number.isFinite(r.ts) && Array.isArray(r.tags));
+}
+
+const tombstoneOk = d => !!d && (d.store === 'tests' || d.store === 'readings') && typeof d.id === 'string' && Number.isFinite(d.at);
 
 /** Bring a validated backup (any supported version) to the current shape. */
 export function migrateBackup(obj) {
@@ -490,4 +511,141 @@ export function migrateBackup(obj) {
 
 export function daysSince(ts, now) {
   return Math.floor((now - ts) / 86400000);
+}
+
+// ---- Tests: linked (shared) copies ---------------------------------------
+
+/** The other person's copy of a meal on this phone, either direction. */
+export function linkedTests(tests, t) {
+  if (!t) return [];
+  return tests.filter(x => x.id !== t.id && (
+    x.id === t.sharedFrom || x.sharedFrom === t.id || (t.sharedFrom && x.sharedFrom === t.sharedFrom)));
+}
+
+/** Copy of a test for another profile (new id, same meal), linked by sharedFrom. */
+export function makeLinkedTest(test, newId, otherProfileId, now = Date.now()) {
+  return { id: newId, profileId: otherProfileId, created: now, updated: now,
+    items: [...test.items], mealName: test.mealName || '', start: test.start, note: test.note || '', sharedFrom: test.id };
+}
+
+// ---- Tombstones (deleted records) ---------------------------------------
+
+export const TOMBSTONE_MAX = 2000;
+
+/** Union of tombstone lists: one per store+id (latest `at`), newest kept when over the limit. */
+export function mergeTombstones(...lists) {
+  const map = new Map();
+  for (const list of lists) for (const d of list || []) {
+    if (!tombstoneOk(d)) continue;
+    const k = d.store + ':' + d.id;
+    const cur = map.get(k);
+    if (!cur || d.at > cur.at) map.set(k, { store: d.store, id: d.id, at: d.at });
+  }
+  return [...map.values()].sort((a, b) => a.at - b.at || (a.store + a.id).localeCompare(b.store + b.id)).slice(-TOMBSTONE_MAX);
+}
+
+export function addTombstone(list, store, id, at = Date.now()) {
+  return mergeTombstones(list, [{ store, id, at }]);
+}
+
+/** Last-change time of a record: updated, else created, else start (tests). */
+export const recordStamp = r => Number(r?.updated ?? r?.created ?? r?.start ?? 0) || 0;
+
+// ---- Sync between phones ------------------------------------------------
+
+export const SYNC_VERSION = 1;
+
+export function buildSync(d, now = new Date()) {
+  return {
+    app: 'glucose-track-sync', version: SYNC_VERSION, exportedAt: now.toISOString(),
+    tests: d.tests, readings: d.readings, deleted: d.deleted || [],
+    settings: { offsetMin: Number(d.settings?.offsetMin) || 0, offsetUpdated: Number(d.settings?.offsetUpdated) || 0 },
+  };
+}
+
+export function validateSync(obj) {
+  const bad = error => ({ ok: false, error });
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return bad('This is not a sync file.');
+  if (obj.app === 'glucose-track') return bad('This is a backup, not a sync file. Use Restore backup instead.');
+  if (obj.app !== 'glucose-track-sync') return bad('This file is not a Glucose Track sync file.');
+  if (obj.version !== SYNC_VERSION) return bad('This sync file was made by a different version of the app. Update both phones.');
+  if (!Array.isArray(obj.tests) || !obj.tests.every(t => testOk(t))) return bad('The sync file has invalid tests.');
+  if (!Array.isArray(obj.readings) || !obj.readings.every(readingOk)) return bad('The sync file has invalid readings.');
+  if (obj.deleted != null && (!Array.isArray(obj.deleted) || !obj.deleted.every(tombstoneOk))) return bad('The sync file has an invalid list of deleted items.');
+  const st = obj.settings;
+  if (st != null && (typeof st !== 'object' || !Number.isFinite(Number(st.offsetMin)) ||
+      (st.offsetUpdated != null && !Number.isFinite(Number(st.offsetUpdated))))) return bad('The sync file has invalid settings.');
+  return { ok: true };
+}
+
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Merge a validated sync file into local data. Pure; the caller writes the result in one transaction.
+ * local = { tests, readings, deleted, settings }. Nothing unique to either side is lost.
+ * A record and a tombstone: the record survives only if it changed after the delete (stamp > at).
+ */
+export function mergeSync(local, incoming) {
+  const lTests = local.tests || [], lReadings = local.readings || [];
+  const tombstones = mergeTombstones(local.deleted, incoming.deleted);
+  const tomb = new Map(tombstones.map(d => [d.store + ':' + d.id, d.at]));
+  const dead = (store, r) => tomb.has(store + ':' + r.id) && tomb.get(store + ':' + r.id) >= recordStamp(r);
+  const summary = { newTests: 0, updatedTests: 0, newReadings: 0, removed: 0, skipped: 0 };
+
+  // tests
+  const putTests = [];
+  const byId = new Map(lTests.map(t => [t.id, t]));
+  const sharedKey = t => (t.sharedFrom ? t.sharedFrom + '|' + t.profileId : null);
+  const shared = new Map(lTests.filter(sharedKey).map(t => [sharedKey(t), t.id]));
+  for (const raw of incoming.tests || []) {
+    const t = migrateTest(raw);
+    if (dead('tests', t)) continue;
+    const cur = byId.get(t.id);
+    if (cur) {
+      const a = recordStamp(t), b = recordStamp(cur);
+      if (sameJson(t, cur)) continue;
+      if (a > b || (a === b && JSON.stringify(t) > JSON.stringify(cur))) { putTests.push(t); byId.set(t.id, t); summary.updatedTests++; }
+      continue;
+    }
+    const k = sharedKey(t);
+    if (k && shared.has(k) && shared.get(k) !== t.id) { summary.skipped++; continue; }
+    putTests.push(t); byId.set(t.id, t); if (k) shared.set(k, t.id); summary.newTests++;
+  }
+  const deleteTests = lTests.filter(t => dead('tests', t)).map(t => t.id);
+
+  // readings: add only, never overwrite
+  const putReadings = [];
+  const ids = new Set(lReadings.map(r => r.id));
+  const keys = new Set(lReadings.map(readingKey).filter(Boolean));
+  for (const r of incoming.readings || []) {
+    if (ids.has(r.id) || dead('readings', r)) continue;
+    const k = readingKey(r);
+    if (k && keys.has(k)) { summary.skipped++; continue; }
+    putReadings.push(r); ids.add(r.id); if (k) keys.add(k); summary.newReadings++;
+  }
+  const deleteReadings = lReadings.filter(r => dead('readings', r)).map(r => r.id);
+  summary.removed = deleteTests.length + deleteReadings.length;
+
+  // meter clock offset: last change wins
+  let settings = null;
+  const inS = incoming.settings;
+  if (inS && (Number(inS.offsetUpdated) || 0) > (Number(local.settings?.offsetUpdated) || 0)) {
+    settings = { ...(local.settings || {}), offsetMin: Number(inS.offsetMin) || 0, offsetUpdated: Number(inS.offsetUpdated) };
+  }
+
+  return { putTests, putReadings, deleteTests, deleteReadings, tombstones, settings, summary,
+    changed: !!(putTests.length || putReadings.length || deleteTests.length || deleteReadings.length || settings ||
+      !sameJson(tombstones, mergeTombstones(local.deleted))) };
+}
+
+/** Apply a merge result to plain arrays (for tests and previews). */
+export function applyMerge(local, m) {
+  const dt = new Set(m.deleteTests), dr = new Set(m.deleteReadings);
+  const put = (arr, puts, del) => {
+    const map = new Map(arr.filter(x => !del.has(x.id)).map(x => [x.id, x]));
+    for (const x of puts) map.set(x.id, x);
+    return [...map.values()];
+  };
+  return { tests: put(local.tests || [], m.putTests, dt), readings: put(local.readings || [], m.putReadings, dr),
+    deleted: m.tombstones, settings: m.settings || local.settings };
 }

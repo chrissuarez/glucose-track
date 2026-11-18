@@ -1,7 +1,7 @@
 import {
   MIN, CONSTANTS, parseReadingsCsv, dedupeReadings, importSummary, evaluateTest, rankFoods, rankIngredients, prickSchedule,
   formatCountdown, foodNames, parseGlucoseInput, makeManualReading, isManual, normFood, normItems, testLabel, mealKey, validateBackup, daysSince, round1,
-  encodeSharedMeal, decodeSharedMeal,
+  encodeSharedMeal, decodeSharedMeal, validateSync, mergeSync, linkedTests, makeLinkedTest,
 } from './logic.js';
 import { readReadingsCsvFromZip } from './zip.js';
 import * as db from './db.js';
@@ -27,7 +27,6 @@ const s = (tag, props, ...kids) => build(document.createElementNS(SVGNS, tag), p
 
 // ---------- state ----------
 let state = null;       // loaded data
-let shareHighlight = null;  // test id whose share card should stand out once
 let cleanup = [];       // timers to clear on route change
 const view = document.getElementById('view');
 
@@ -255,6 +254,11 @@ function testView(id) {
       h('p', { class: 'help' }, 'Keep this app open for alerts. Phones may pause it when the screen is off, so also set a phone timer.')));
   }
 
+  const linked = linkedTests(state.tests, t);
+  if (linked.length) {
+    const names = [...new Set(linked.map(x => state.profiles.find(p => p.id === x.profileId)?.name).filter(Boolean))];
+    if (names.length) nodes.splice(3, 0, h('p', { class: 'help' }, `Shared with ${names.join(', ')}`));
+  }
   if (profile().id === t.profileId) nodes.push(shareCard(t));
   if (profile().id === t.profileId) nodes.push(addReadingCard());
 
@@ -282,14 +286,14 @@ function testView(id) {
         h('td', null, isManual(r) ? [h('span', { class: 'sub' }, 'typed '),
           h('button', { type: 'button', class: 'btn danger small', 'aria-label': `Delete typed reading ${round1(r.value).toFixed(1)} at ${fmtTime(r.ts)}`, onclick: async () => {
             if (!confirm(`Delete the typed reading ${round1(r.value).toFixed(1)} mmol/L at ${fmtTime(r.ts)}?`)) return;
-            try { await db.del('readings', r.id); await reload(); render(); } catch (e) { toast(e.message); }
+            try { await db.delWithTombstone('readings', r.id); await reload(); render(); } catch (e) { toast(e.message); }
           } }, 'Delete')] : null)))));
   }
   nodes.push(h('div', { class: 'actions' },
     h('a', { class: 'btn secondary', href: `#/edit/${t.id}` }, 'Edit'),
     h('button', { class: 'btn danger', onclick: async () => {
       if (!confirm(`Delete the test "${testLabel(t)}"? This cannot be undone.`)) return;
-      try { await db.del('tests', t.id); await reload(); location.hash = '#/tests'; } catch (e) { toast(e.message); }
+      try { await db.delWithTombstone('tests', t.id); await reload(); location.hash = '#/tests'; } catch (e) { toast(e.message); }
     } }, 'Delete')));
   return nodes;
 }
@@ -298,8 +302,6 @@ const otherProfile = () => state.profiles.find(p => p.id !== profile().id) || nu
 function shareCard(t) {
   const other = otherProfile();
   if (!other) return null;
-  const hl = shareHighlight === t.id;
-  if (hl) shareHighlight = null;
   const out = h('div', { role: 'status' });
   const send = async () => {
     const url = location.origin + location.pathname + '#/join/' + encodeSharedMeal(t, other.id);
@@ -316,7 +318,7 @@ function shareCard(t) {
     out.replaceChildren(h('p', { class: 'help' }, 'Copy this link and send it to ' + other.name + '.'), box);
     box.focus();
   };
-  return h('div', { class: 'card' + (hl ? ' hl' : '') },
+  return h('div', { class: 'card' },
     h('h3', null, 'Shared meal'),
     h('button', { class: 'btn', type: 'button', onclick: send }, `Send to ${other.name}`),
     out,
@@ -339,7 +341,7 @@ function joinView(data) {
         toast('This meal is already added.'); location.hash = `#/test/${dup.id}`; return;
       }
       const known = new Map(foodNames(state.tests.filter(t => t.profileId === target.id)).map(n => [normFood(n), n]));
-      const rec = { id: uid(), profileId: target.id, created: Date.now(),
+      const rec = { id: uid(), profileId: target.id, created: Date.now(), updated: Date.now(),
         items: normItems(m.items.map(n => known.get(normFood(n)) || n)), mealName: m.mealName, start: m.start, note: m.note, sharedFrom: m.sid };
       await db.put('tests', rec);
       await db.setMeta('selectedProfile', target.id);
@@ -425,14 +427,17 @@ function testFormView(id) {
     // reuse the existing spelling of a food seen before in this profile
     const known = new Map(names.map(n => [normFood(n), n]));
     const finalItems = normItems(all.map(n => known.get(normFood(n)) || n));
-    const rec = existing ? { ...existing } : { id: uid(), profileId: profile().id, created: Date.now() };
+    const now = Date.now();
+    const rec = existing ? { ...existing } : { id: uid(), profileId: profile().id, created: now };
     delete rec.food;
-    Object.assign(rec, { items: finalItems, mealName: mealName.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim() });
+    Object.assign(rec, { items: finalItems, mealName: mealName.value.trim().replace(/\s+/g, ' '), start: st, note: note.value.trim(), updated: now });
+    // "<other> ate this too": also add their copy on this phone (a sync carries it to their phone)
+    const copy = !existing && other && alsoAte.checked ? makeLinkedTest(rec, uid(), other.id, now) : null;
     try {
-      await db.put('tests', rec);
+      await db.putMany('tests', copy ? [rec, copy] : [rec]);
       if (bp.ok) await db.put('readings', makeManualReading(uid(), profile().id, bp.value, Math.min(Date.now(), st)));
       await reload();
-      if (!existing && alsoAte.checked) shareHighlight = rec.id;
+      if (copy) toast(`Also added for ${other.name}. Send a sync file, or the link below, so it reaches their phone.`);
       location.hash = `#/test/${rec.id}`; }
     catch (ex) { err.replaceChildren(errorCard(ex)); }
   } },
@@ -466,7 +471,7 @@ function importView() {
       const isZip = /\.zip$/i.test(file.name) || (head[0] === 0x50 && head[1] === 0x4b);
       const text = isZip ? await readReadingsCsvFromZip(buf) : new TextDecoder().decode(buf);
       const { readings, invalid } = parseReadingsCsv(text);
-      const { fresh, duplicates } = dedupeReadings(readings, state.readings.map(r => r.id));
+      const { fresh, duplicates } = dedupeReadings(readings, state.readings.map(r => r.id), state.readings);
       await db.putMany('readings', fresh);
       await reload();
       const sum = importSummary(fresh, duplicates, invalid, state.profiles);
@@ -493,7 +498,8 @@ function foodHelp() {
     ['Prick 4 times', 'Before eating (baseline), then 30, 60 and 120 minutes after the first bite.'],
     ['Tag your readings', 'Type your name (Chris or Lea) as the tag on the meter so it goes to the right person.'],
     ['No Keto-Mojo app?', 'Type each reading into the test screen right after you prick.'],
-    ['Ate the same meal?', 'Enter it once. Tick "ate this too" or tap "Send to" on the test screen, and send the link. The other person opens it, adds the meal, then adds their own readings.'],
+    ['Ate the same meal?', 'Enter it once and tick "ate this too". The meal is added for both of you. Or tap "Send to" on the test screen and send the link.'],
+    ['Two phones?', 'Import the meter file on one phone. Then send a sync file (Settings) to the other phone and import it there. Nothing unique to either phone is lost.'],
     ['Import the export', 'After the test, import the meter export. The app matches readings to tests by time.'],
     ['Repeat 2-3 times', 'One test is only a hint; averages are more reliable.'],
     ['Add to home screen', 'On iPhone, Safari may delete data from sites not opened for 7 days unless the app is on the home screen. Make backups regularly anyway.'],
@@ -601,7 +607,7 @@ function settingsView() {
     h('button', { class: 'btn', onclick: async () => {
       const v = Number(off.value);
       if (off.value.trim() === '' || !Number.isFinite(v)) { omsg.replaceChildren(h('p', { class: 'help' }, 'Enter a number of minutes, for example -120.')); return; }
-      try { await db.setMeta('settings', { ...state.settings, offsetMin: v }); await reload(); omsg.replaceChildren(h('p', { class: 'help' }, 'Saved. All tests re-scored.')); }
+      try { await db.setMeta('settings', { ...state.settings, offsetMin: v, offsetUpdated: Date.now() }); await reload(); omsg.replaceChildren(h('p', { class: 'help' }, 'Saved. All tests re-scored.')); }
       catch (e) { omsg.replaceChildren(errorCard(e)); }
     } }, 'Save offset')));
 
@@ -631,27 +637,73 @@ function settingsView() {
     h('button', { class: 'btn', onclick: () => downloadBackup(bmsg) }, 'Download backup'),
     h('label', { for: 'restore' }, 'Restore backup'), restoreInput));
 
+  nodes.push(syncCard());
+
   nodes.push(h('div', { class: 'card' }, h('h3', null, 'Help'),
     h('a', { class: 'btn secondary', href: '#/help' }, 'How to test'),
     h('a', { class: 'btn secondary', href: '#/import' }, 'Import meter readings')));
   return nodes;
 }
 
+function syncCard() {
+  const other = otherProfile();
+  const smsg = h('div', { role: 'status' });
+  const input = h('input', { type: 'file', id: 'syncfile', accept: '.json,application/json' });
+  input.addEventListener('change', async () => {
+    const f = input.files[0];
+    if (!f) return;
+    try {
+      let obj;
+      try { obj = JSON.parse(await f.text()); } catch { throw new Error('That file is not valid JSON.'); }
+      const v = validateSync(obj);
+      if (!v.ok) throw new Error(v.error);
+      const m = mergeSync(state, obj);
+      await db.applySync(m);
+      await reload(); render();
+      const sum = m.summary;
+      document.getElementById('syncmsg')?.replaceChildren(h('div', { class: 'card' }, h('h3', null, 'Sync finished'),
+        h('ul', { class: 'plain' },
+          h('li', null, `New meals: ${sum.newTests}`),
+          h('li', null, `Updated meals: ${sum.updatedTests}`),
+          h('li', null, `New readings: ${sum.newReadings}`),
+          h('li', null, `Removed (deleted on the other phone): ${sum.removed}`),
+          h('li', null, `Duplicates skipped: ${sum.skipped}`),
+          m.settings ? h('li', null, `Meter clock offset now ${m.settings.offsetMin} min`) : null)));
+    } catch (e) { smsg.replaceChildren(errorCard(e)); }
+    input.value = '';
+  });
+  return h('div', { class: 'card' }, h('h3', null, other ? `Sync with ${other.name}` : 'Sync with the other phone'),
+    h('p', { class: 'help' }, 'Import the meter file on one phone. Then send a sync file to the other phone and import it there. Nothing is overwritten: each phone keeps what only it has. Works both ways.'),
+    h('div', { id: 'syncmsg', role: 'status' }), smsg,
+    h('button', { class: 'btn', onclick: () => sendSync(smsg) }, 'Send sync file'),
+    h('label', { for: 'syncfile' }, 'Import sync file'), input);
+}
+
+async function shareFile(data, name) {
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const file = new File([blob], name, { type: 'application/json' });
+  if (navigator.canShare?.({ files: [file] })) {   // iPhone: lets you pick "Save to Files", WhatsApp, AirDrop
+    try { await navigator.share({ files: [file], title: name }); return true; }
+    catch (e) { if (e.name === 'AbortError') return false; }
+  }
+  const a = h('a', { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a); a.click(); a.remove();
+  return true;
+}
+
+async function sendSync(msgEl) {
+  try {
+    const name = `glucose-track-sync-${new Date().toISOString().slice(0, 10)}.json`;
+    if (!await shareFile(await db.exportSync(), name)) return;
+    msgEl.replaceChildren(h('p', { class: 'help' }, `Sync file saved as ${name}. Import it on the other phone.`));
+  } catch (e) { msgEl.replaceChildren(errorCard(e)); }
+}
+
 async function downloadBackup(msgEl) {
   try {
     const data = await db.exportBackup();
     const name = `glucose-track-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-    const file = new File([blob], name, { type: 'application/json' });
-    let done = false;
-    if (navigator.canShare?.({ files: [file] })) {   // iPhone: lets you pick "Save to Files"
-      try { await navigator.share({ files: [file], title: name }); done = true; }
-      catch (e) { if (e.name === 'AbortError') return; }
-    }
-    if (!done) {
-      const a = h('a', { href: URL.createObjectURL(blob), download: name });
-      document.body.append(a); a.click(); a.remove();
-    }
+    if (!await shareFile(data, name)) return;
     await db.setMeta('lastBackup', Date.now());
     await reload();
     msgEl.replaceChildren(h('p', { class: 'help' }, `Backup saved as ${name}.`));
