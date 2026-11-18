@@ -522,9 +522,37 @@ export function linkedTests(tests, t) {
     x.id === t.sharedFrom || x.sharedFrom === t.id || (t.sharedFrom && x.sharedFrom === t.sharedFrom)));
 }
 
-/** Copy of a test for another profile (new id, same meal), linked by sharedFrom. */
+/** The one id a shared copy has on every phone: fixed by the meal it came from and whose copy it is. */
+export const linkedTestId = (sharedFrom, profileId) => 's-' + sharedFrom + '-' + profileId;
+
+/** A test's canonical id: linkedTestId for shared copies, else its own id. */
+export const canonicalTestId = t => (t && t.sharedFrom && t.profileId ? linkedTestId(t.sharedFrom, t.profileId) : t?.id);
+
+/** Newer of two versions of the same test (stamp, then JSON as a stable tie-break). */
+const newerTest = (a, b) => {
+  const x = recordStamp(a), y = recordStamp(b);
+  return x > y || (x === y && JSON.stringify(a) > JSON.stringify(b)) ? a : b;
+};
+
+/**
+ * Re-key shared copies saved under an old random id to their canonical id, keeping the newest
+ * version when several aliases exist. Returns { tests, rekeyed: [old ids], aliases: Map(old id -> canonical) }.
+ */
+export function canonicalizeTests(tests) {
+  const byId = new Map(), rekeyed = [], aliases = new Map();
+  for (const raw of tests || []) {
+    const t0 = migrateTest(raw), c = canonicalTestId(t0);
+    const t = c === t0.id ? t0 : { ...t0, id: c };
+    if (c !== t0.id) { rekeyed.push(t0.id); aliases.set(t0.id, c); }
+    const cur = byId.get(c);
+    byId.set(c, cur ? newerTest(t, cur) : t);
+  }
+  return { tests: [...byId.values()], rekeyed, aliases };
+}
+
+/** Copy of a test for another profile (same meal), linked by sharedFrom. Its id is linkedTestId; newId is ignored. */
 export function makeLinkedTest(test, newId, otherProfileId, now = Date.now()) {
-  return { id: newId, profileId: otherProfileId, created: now, updated: now,
+  return { id: linkedTestId(test.id, otherProfileId), profileId: otherProfileId, created: now, updated: now,
     items: [...test.items], mealName: test.mealName || '', start: test.start, note: test.note || '', sharedFrom: test.id };
 }
 
@@ -587,31 +615,37 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  */
 export function mergeSync(local, incoming) {
   const lTests = local.tests || [], lReadings = local.readings || [];
-  const tombstones = mergeTombstones(local.deleted, incoming.deleted);
+  let tombstones = mergeTombstones(local.deleted, incoming.deleted);
   const tomb = new Map(tombstones.map(d => [d.store + ':' + d.id, d.at]));
   const dead = (store, r) => tomb.has(store + ':' + r.id) && tomb.get(store + ':' + r.id) >= recordStamp(r);
   const summary = { newTests: 0, updatedTests: 0, newReadings: 0, removed: 0, skipped: 0 };
 
-  // tests
+  // tests: shared copies are compared under their canonical id, so the same meal on two phones is one record.
+  // A delete of an old alias id counts as a delete of the canonical id.
+  const L = canonicalizeTests(lTests), I = canonicalizeTests(incoming.tests);
+  for (const [alias, c] of [...L.aliases, ...I.aliases]) {
+    const at = tomb.get('tests:' + alias);
+    if (at != null && !(tomb.get('tests:' + c) >= at)) { tomb.set('tests:' + c, at); tombstones = addTombstone(tombstones, 'tests', c, at); }
+  }
   const putTests = [];
-  const byId = new Map(lTests.map(t => [t.id, t]));
-  const sharedKey = t => (t.sharedFrom ? t.sharedFrom + '|' + t.profileId : null);
-  const shared = new Map(lTests.filter(sharedKey).map(t => [sharedKey(t), t.id]));
-  for (const raw of incoming.tests || []) {
-    const t = migrateTest(raw);
+  const localById = new Map(lTests.map(t => [t.id, t]));
+  const byId = new Map(L.tests.map(t => [t.id, t]));
+  for (const t of L.tests) {            // local alias re-keyed: write it under the canonical id
+    if (!dead('tests', t) && !sameJson(t, localById.get(t.id))) putTests.push(t);
+  }
+  for (const t of I.tests) {
     if (dead('tests', t)) continue;
     const cur = byId.get(t.id);
     if (cur) {
-      const a = recordStamp(t), b = recordStamp(cur);
-      if (sameJson(t, cur)) continue;
-      if (a > b || (a === b && JSON.stringify(t) > JSON.stringify(cur))) { putTests.push(t); byId.set(t.id, t); summary.updatedTests++; }
+      if (sameJson(t, cur) || newerTest(t, cur) === cur) continue;
+      const i = putTests.findIndex(x => x.id === t.id);
+      if (i >= 0) putTests.splice(i, 1);
+      putTests.push(t); byId.set(t.id, t); summary.updatedTests++;
       continue;
     }
-    const k = sharedKey(t);
-    if (k && shared.has(k) && shared.get(k) !== t.id) { summary.skipped++; continue; }
-    putTests.push(t); byId.set(t.id, t); if (k) shared.set(k, t.id); summary.newTests++;
+    putTests.push(t); byId.set(t.id, t); summary.newTests++;
   }
-  const deleteTests = lTests.filter(t => dead('tests', t)).map(t => t.id);
+  const deleteTests = [...new Set([...L.rekeyed, ...L.tests.filter(t => dead('tests', t)).map(t => t.id)])];
 
   // readings: add only, never overwrite
   const putReadings = [];
