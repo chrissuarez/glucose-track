@@ -568,7 +568,7 @@ function helpView() {
     h('h3', null, 'How results are scored'),
     h('ul', { class: 'plain' },
       h('li', null, 'Peak rise = highest reading in the 3 hours after eating minus your baseline.'),
-      h('li', null, 'A test is complete with a baseline, at least 2 readings after eating, and one of them 45-75 minutes after the first bite.')),
+      h('li', null, `A test is complete with a baseline, at least 2 readings after eating, and one of them ${CONSTANTS.KEY_WINDOW_MIN}-${CONSTANTS.KEY_WINDOW_MAX} minutes after the first bite.`)),
     h('h3', null, 'What the rise means'),
     h('div', { class: 'scale' },
       h('div', { class: 'scale-bar', role: 'img', 'aria-label': `Scale in mmol/L: green under ${G}, amber ${G} to ${A}, red over ${A}` },

@@ -10,8 +10,8 @@ export const CONSTANTS = {
   BASELINE_BEFORE_MIN: 30,   // baseline window starts this long before start
   BASELINE_AFTER_MIN: 5,     // ...and ends this long after start
   POST_END_MIN: 180,         // post readings up to start + 180
-  KEY_WINDOW_MIN: 45,        // one post reading must lie in [45, 75]
-  KEY_WINDOW_MAX: 75,
+  KEY_WINDOW_MIN: 45,        // one post reading must lie in [45, 90]
+  KEY_WINDOW_MAX: 90,
   MIN_POST_READINGS: 2,
   LOW_CONFIDENCE_BELOW: 2,   // fewer complete tests than this -> low confidence (meals)
   INGREDIENT_LOW_CONFIDENCE_BELOW: 3, // same, for single ingredients
