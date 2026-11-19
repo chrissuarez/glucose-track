@@ -129,13 +129,14 @@ test('a reading at +5 is baseline, not post; post window is (5,180]', () => {
   assert.deepEqual(r.post.map(x => x.id), ['p', 'q']);
 });
 
-test('complete needs baseline, 2 post readings, one in 45..75', () => {
+test('complete needs baseline, 2 post readings, one in 45..90', () => {
   assert.equal(m([G('b', -5, 5), G('p1', 45, 6), G('p2', 120, 5)]).complete, true);
-  assert.equal(m([G('b', -5, 5), G('p1', 75, 6), G('p2', 120, 5)]).complete, true);
+  assert.equal(m([G('b', -5, 5), G('p1', 90, 6), G('p2', 120, 5)]).complete, true);
+  assert.equal(m([G('b', 0, 3.9), G('p1', 32, 4.7), G('p2', 85, 8.9), G('p3', 127, 6.9)]).complete, true); // late 1-hour prick
   const noKey = m([G('b', -5, 5), G('p1', 44, 6), G('p2', 120, 5)]);
   assert.equal(noKey.complete, false);
-  assert.match(noKey.missing.join(' '), /45-75/);
-  assert.equal(m([G('b', -5, 5), G('p1', 76, 6), G('p2', 120, 5)]).complete, false);
+  assert.match(noKey.missing.join(' '), /45-90/);
+  assert.equal(m([G('b', -5, 5), G('p1', 91, 6), G('p2', 120, 5)]).complete, false);
   const onePost = m([G('b', -5, 5), G('p1', 60, 6)]);
   assert.equal(onePost.complete, false);
   assert.match(onePost.missing.join(' '), /at least 2/);
